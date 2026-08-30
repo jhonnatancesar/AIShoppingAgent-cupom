@@ -1,0 +1,16 @@
+# Segredos -- nunca versionar
+.env
+
+# Ambiente virtual
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+
+# Dados locais (SQLite do worker, gerado em runtime)
+data/*.db
+data/*.db-journal
+
+# Perfil dedicado do Edge (se algum dia for gerado dentro do repo)
+*-edge-profile/

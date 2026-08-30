@@ -1,0 +1,9 @@
+# Coupon Collector (Windows Server, Microsoft Edge nativo via CDP)
+# playwright: só o pacote Python/driver -- NENHUM binário de navegador é
+# baixado ou gerenciado por ele (nunca rode "playwright install"). O Edge
+# usado é sempre o já instalado no Windows, subido por coupons/edge_transport.py
+# como subprocesso dedicado e conectado via connect_over_cdp().
+playwright>=1.49
+aiohttp>=3.9
+python-dotenv>=1.0
+tzdata>=2024.1   # base IANA p/ zoneinfo em qualquer plataforma (inclui America/Sao_Paulo)

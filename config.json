@@ -1,0 +1,109 @@
+{
+  "timezone": "America/Sao_Paulo",
+
+  "control": {
+    "_comentario": "Endpoint de controle. Bind local por padrao; so exponha se precisar. Token vem de .env (AUTH_TOKEN).",
+    "host": "127.0.0.1",
+    "port": 8090
+  },
+
+  "playwright": {
+    "_comentario": "Edge real do sistema via CDP dedicado, nunca navegador gerenciado pelo Playwright. edge_executable=null usa a descoberta automatica (Program Files); so preencha se o Edge estiver em outro caminho. edge_cdp_port DEVE ser diferente da porta do collection_worker principal (9223 em producao) para os dois nunca colidirem na mesma maquina.",
+    "headless": true,
+    "navigation_timeout_ms": 30000,
+    "action_timeout_ms": 15000,
+    "edge_cdp_port": 9224,
+    "edge_executable": null,
+    "edge_startup_timeout_seconds": 30
+  },
+
+  "scanner": {
+    "_comentario": "Limita o aprofundamento p/ economizar RAM/tempo/requisicoes. So aprofunda (detalhe de produto) quando ha indicio de cupom.",
+    "max_product_details_per_store": 3
+  },
+
+  "retry": {
+    "max_attempts": 2,
+    "base_delay_seconds": 5,
+    "max_delay_seconds": 60
+  },
+
+  "backoff_block_hours": 4,
+
+  "data_db": "data/worker.db",
+
+  "block_markers": [
+    "attention required", "access denied", "just a moment",
+    "verifique que voce", "verify you are human", "checking your browser",
+    "captcha", "unusual traffic", "blocked", "cf-mitigated"
+  ],
+
+  "stores": {
+    "amazon": {
+      "enabled": true,
+      "sources": [
+        { "kind": "home",    "label": "home",
+          "url": "https://www.amazon.com.br/",
+          "selector": "[data-component-type=\"s-search-result\"][data-asin]" },
+        { "kind": "coupons", "label": "pagina-cupons",
+          "url": "https://www.amazon.com.br/coupons" },
+        { "kind": "banners", "label": "blocos-promo",
+          "selector": "[data-component-type=\"s-search-result\"][data-asin], [role=\"main\"]" },
+        { "kind": "cards",   "label": "cards-ofertas",
+          "selector": "[data-component-type=\"s-search-result\"][data-asin]" },
+        { "kind": "search",  "label": "busca-cupom",
+          "selector": "[data-component-type=\"s-search-result\"][data-asin]",
+          "terms": ["RTX 5070", "notebook gamer", "air fryer"] },
+        { "kind": "product", "label": "detalhe-produto" }
+      ]
+    },
+    "kabum": {
+      "enabled": true,
+      "sources": [
+        { "kind": "home",    "label": "home",
+          "url": "https://www.kabum.com.br/",
+          "selector": "a[href*=\"/produto/\"]" },
+        { "kind": "coupons", "label": "area-cupom",
+          "url": "https://www.kabum.com.br/cupons" },
+        { "kind": "banners", "label": "carrosseis",
+          "selector": "[class*=\"banner\"], [class*=\"carousel\"], section" },
+        { "kind": "cards",   "label": "cards-home",
+          "selector": "a[href*=\"/produto/\"]" },
+        { "kind": "search",  "label": "busca-cupom",
+          "selector": "main a[href*=\"/produto/\"]",
+          "terms": ["processador ryzen 7", "placa de video rtx", "gabinete gamer"] },
+        { "kind": "product", "label": "detalhe-produto" }
+      ]
+    },
+    "magalu": {
+      "enabled": true,
+      "sources": [
+        { "kind": "home",    "label": "home",
+          "url": "https://www.magazineluiza.com.br/",
+          "selector": "a[data-testid=\"product-card-link\"][href*=\"/p/\"]" },
+        { "kind": "coupons", "label": "area-cupons",
+          "url": "https://www.magazineluiza.com.br/ofertas/" },
+        { "kind": "banners", "label": "banners-promo",
+          "selector": "a[data-testid=\"product-card-link\"][href*=\"/p/\"], section" },
+        { "kind": "cards",   "label": "cards-ofertas",
+          "selector": "a[data-testid=\"product-card-link\"][href*=\"/p/\"]" },
+        { "kind": "product", "label": "detalhe-produto" }
+      ]
+    },
+    "mercadolivre": {
+      "enabled": true,
+      "sources": [
+        { "kind": "home",    "label": "home",
+          "url": "https://www.mercadolivre.com.br/",
+          "selector": "li.ui-search-layout__item" },
+        { "kind": "coupons", "label": "area-cupons",
+          "url": "https://www.mercadolivre.com.br/cupons" },
+        { "kind": "banners", "label": "campanhas-promo",
+          "selector": "li.ui-search-layout__item, section" },
+        { "kind": "cards",   "label": "cards-ofertas",
+          "selector": "li.ui-search-layout__item" },
+        { "kind": "product", "label": "detalhe-produto" }
+      ]
+    }
+  }
+}
