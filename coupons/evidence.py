@@ -22,9 +22,33 @@ from .persistence import Coupon
 STORE_MARKER = {
     "amazon": re.compile(r"cupom\s+de\s+r\$\s*([\d.,]+)\s+de\s+desconto", re.I),
     "amazon_pct": re.compile(r"cupom\s+de\s+(\d+(?:[.,]\d+)?)\s*%\s+de\s+desconto", re.I),
+    # Fraseado real confirmado ao vivo (2026-08-30): a Amazon mudou a UI de
+    # cards de busca desde a auditoria original -- hoje mostra só o preço
+    # final já com o clip coupon aplicado ("Você paga R$X,XX com o
+    # cupom"), nunca o valor do desconto isolado. Sem código (clip coupon,
+    # aplicado automaticamente, igual já registrado na auditoria original).
+    # Nunca inferimos o valor do desconto comparando com outro preço do
+    # card (ambíguo, teria preço "à vista"/parcelado/etc. misturados) --
+    # só a evidência literal do preço final vira `raw_rule_text`.
+    "amazon_final_price": re.compile(r"voc[eê]\s+paga\s+r\$\s*([\d.,]+)\s+com\s+o\s+cupom", re.I),
     "kabum": re.compile(r"\bSELO\s*:\s*CUPOM\s+(\w+)\b", re.I),
     "magalu": re.compile(r"cupom\s+r\$\s*([\d.,]+)\s+OFF", re.I),
-    "mercadolivre": re.compile(r"(\d+(?:[.,]\d+)?)\s*%\s*OFF\s+com\s+(?:c[oO]upom|cupom\b)", re.I),
+    # Percentual (achado ao vivo 2026-08-30 em cards de busca reais -- o
+    # padrão fixo acima nunca cobriu isso, só valor em R$).
+    "magalu_pct": re.compile(r"cupom\s+(\d+(?:[.,]\d+)?)\s*%\s*OFF", re.I),
+    # Mercado Livre tem 4 fraseados reais confirmados (diagnóstico ao vivo,
+    # 2026-08-30, sessão autenticada): carrossel da home ("R$X OFF com
+    # Cupom" / "X% OFF com Cupom", cupom DEPOIS) e cards da página /cupons
+    # ("Cupom X% OFF ..." / "Cupom R$X OFF ...", cupom ANTES; card real
+    # inclui "Cupom ativado de X% OFF em produtos de <vendedor>").
+    "mercadolivre_pct_after": re.compile(r"(\d+(?:[.,]\d+)?)\s*%\s*OFF\s+com\s+cupom", re.I),
+    "mercadolivre_fixed_after": re.compile(r"R\$\s*([\d.,]+)\s*OFF\s+com\s+cupom", re.I),
+    "mercadolivre_pct_before": re.compile(r"cupom\s+(?:ativado\s+de\s+)?(\d+(?:[.,]\d+)?)\s*%\s*OFF", re.I),
+    "mercadolivre_fixed_before": re.compile(r"cupom\s+r\$\s*([\d.,]+)\s*OFF", re.I),
+    # Campos estruturados adicionais, presentes nos cards de /cupons --
+    # nunca disparam achado sozinhos, só complementam um achado já feito.
+    "mercadolivre_min_purchase": re.compile(r"compra\s+m[ií]nima\s*r\$\s*([\d.,]+)", re.I),
+    "mercadolivre_limit": re.compile(r"limite\s+de\s*r\$\s*([\d.,]+)", re.I),
 }
 
 _HAS_COUPON = re.compile(r"cupom", re.I)
@@ -67,6 +91,14 @@ def _parse_store(store_id: str, text: str) -> List[Dict]:
                 "code": None, "discount_kind": "percentage",
                 "discount_value": value, "raw_rule_text": m.group(0),
             })
+        for m in STORE_MARKER["amazon_final_price"].finditer(text):
+            # Evidência real de clip coupon (preço final, sem valor de
+            # desconto isolado declarado) -- nunca inventa discount_value
+            # comparando com outro preço ambíguo do card.
+            found.append({
+                "code": None, "discount_kind": None,
+                "discount_value": None, "raw_rule_text": m.group(0),
+            })
     elif store_id == "kabum":
         for m in STORE_MARKER["kabum"].finditer(text):
             found.append({
@@ -82,8 +114,7 @@ def _parse_store(store_id: str, text: str) -> List[Dict]:
                 "code": None, "discount_kind": "fixed_amount",
                 "discount_value": value, "raw_rule_text": m.group(0),
             })
-    elif store_id == "mercadolivre":
-        for m in STORE_MARKER["mercadolivre"].finditer(text):
+        for m in STORE_MARKER["magalu_pct"].finditer(text):
             value = _to_float(m.group(1))
             if value is None:
                 continue
@@ -91,7 +122,39 @@ def _parse_store(store_id: str, text: str) -> List[Dict]:
                 "code": None, "discount_kind": "percentage",
                 "discount_value": value, "raw_rule_text": m.group(0),
             })
+    elif store_id == "mercadolivre":
+        extras = _mercadolivre_extras(text)
+        for key, kind in (
+            ("mercadolivre_pct_after", "percentage"),
+            ("mercadolivre_fixed_after", "fixed_amount"),
+            ("mercadolivre_pct_before", "percentage"),
+            ("mercadolivre_fixed_before", "fixed_amount"),
+        ):
+            for m in STORE_MARKER[key].finditer(text):
+                value = _to_float(m.group(1))
+                if value is None:
+                    continue
+                found.append({
+                    "code": None, "discount_kind": kind,
+                    "discount_value": value, "raw_rule_text": m.group(0),
+                    **extras,
+                })
     return found
+
+
+def _mercadolivre_extras(text: str) -> Dict[str, Optional[float]]:
+    """Campos estruturados adicionais já presentes nos cards de
+    /cupons -- "Compra mínima R$X" e "Limite de R$X" -- aplicados a
+    qualquer achado da MESMA fonte (card já é um único cupom, não há
+    ambiguidade de qual achado eles pertencem)."""
+    extras: Dict[str, Optional[float]] = {}
+    m_min = STORE_MARKER["mercadolivre_min_purchase"].search(text)
+    if m_min:
+        extras["minimum_purchase_amount"] = _to_float(m_min.group(1))
+    m_limit = STORE_MARKER["mercadolivre_limit"].search(text)
+    if m_limit:
+        extras["maximum_discount_amount"] = _to_float(m_limit.group(1))
+    return extras
 
 
 def _evidence_key(store_id: str, source_kind: str, finding: Dict, \
@@ -153,6 +216,8 @@ def build_coupons(store_id: str, source_kind: str, text: str,
             code=f.get("code"),
             discount_kind=f.get("discount_kind"),
             discount_value=f.get("discount_value"),
+            minimum_purchase_amount=f.get("minimum_purchase_amount"),
+            maximum_discount_amount=f.get("maximum_discount_amount"),
             evidence=_evidence_key(store_id, source_kind, f, reference_url),
             scope_kind=scope_kind,
             scope_reference=scope_ref,

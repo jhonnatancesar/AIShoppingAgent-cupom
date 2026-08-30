@@ -18,8 +18,10 @@
   },
 
   "scanner": {
-    "_comentario": "Limita o aprofundamento p/ economizar RAM/tempo/requisicoes. So aprofunda (detalhe de produto) quando ha indicio de cupom.",
-    "max_product_details_per_store": 3
+    "_comentario": "Limita o aprofundamento p/ economizar RAM/tempo/requisicoes. So aprofunda (detalhe de produto) quando ha indicio de cupom. Varredura ja e sempre por fila, uma loja de cada vez, nunca paralelo. delay_between_requests_seconds: pausa antes de cada navegacao (fonte, produto aprofundado) dentro da MESMA loja. cooldown_between_stores_seconds: pausa maior, so na troca de loja. Ritmo humano/respeitoso, sem pressa nenhuma -- cadencia ja e de 1h/30min. Pode aumentar a vontade.",
+    "max_product_details_per_store": 3,
+    "delay_between_requests_seconds": 5,
+    "cooldown_between_stores_seconds": 20
   },
 
   "retry": {
@@ -35,7 +37,10 @@
   "block_markers": [
     "attention required", "access denied", "just a moment",
     "verifique que voce", "verify you are human", "checking your browser",
-    "captcha", "unusual traffic", "blocked", "cf-mitigated"
+    "unusual traffic", "blocked", "cf-mitigated",
+    "resolva o captcha", "complete o captcha", "digite o captcha",
+    "solve the captcha", "complete the captcha",
+    "nao sou um robo", "i'm not a robot", "i am not a robot"
   ],
 
   "stores": {
@@ -65,6 +70,9 @@
           "selector": "a[href*=\"/produto/\"]" },
         { "kind": "coupons", "label": "area-cupom",
           "url": "https://www.kabum.com.br/cupons" },
+        { "kind": "coupons", "label": "hotsite-cupons",
+          "url": "https://www.kabum.com.br/hotsite/cupons/",
+          "_comentario": "URL indicada pelo usuario. Diagnostico real (2026-08-30) achou so conteudo de FAQ/central de ajuda sobre cupom nessa pagina (sem cards de codigo visiveis) -- mantida mesmo assim, nivel de pagina, sem seletor de card." },
         { "kind": "banners", "label": "carrosseis",
           "selector": "[class*=\"banner\"], [class*=\"carousel\"], section" },
         { "kind": "cards",   "label": "cards-home",
@@ -76,6 +84,7 @@
       ]
     },
     "magalu": {
+      "_comentario": "Fonte 'search' adicionada apos diagnostico real (2026-08-30): home e /ofertas nao tinham nenhuma campanha ativa no momento, mas paginas de busca real tem cupom (percentual E valor fixo) o tempo todo em varias categorias -- ate entao a Magalu nunca era nem visitada nessas paginas.",
       "enabled": true,
       "sources": [
         { "kind": "home",    "label": "home",
@@ -87,17 +96,24 @@
           "selector": "a[data-testid=\"product-card-link\"][href*=\"/p/\"], section" },
         { "kind": "cards",   "label": "cards-ofertas",
           "selector": "a[data-testid=\"product-card-link\"][href*=\"/p/\"]" },
+        { "kind": "search",  "label": "busca-cupom",
+          "selector": "a[data-testid=\"product-card-link\"][href*=\"/p/\"]",
+          "terms": ["notebook gamer", "fone bluetooth", "cadeira gamer", "smartphone"] },
         { "kind": "product", "label": "detalhe-produto" }
       ]
     },
     "mercadolivre": {
+      "_comentario": "Sem sessao autenticada, /cupons redireciona pra login (diagnostico real 2026-08-30). Com sessao (login manual no perfil dedicado, coupons/edge_transport.py + login_manual.py), /cupons carrega normalmente e tem cards REAIS de cupom (div.coupon-card, ~73 na pagina, confirmado ao vivo -- 'Cupom X% OFF ...'/'Cupom R$X OFF ...', com Compra minima/Limite de). O carrossel da home tambem tem cupom real: cards .poly-card que contem .poly-coupons__wrapper ('R$X OFF com Cupom'). Selectors abaixo apontam pros elementos REAIS de cupom, nunca o generico de produto (li.ui-search-layout__item so serve pra oferta normal, mantido nas fontes que nao sao sobre cupom).",
       "enabled": true,
       "sources": [
         { "kind": "home",    "label": "home",
           "url": "https://www.mercadolivre.com.br/",
           "selector": "li.ui-search-layout__item" },
+        { "kind": "cards",   "label": "carrossel-cupons-home",
+          "selector": ".poly-card:has(.poly-coupons__wrapper)" },
         { "kind": "coupons", "label": "area-cupons",
-          "url": "https://www.mercadolivre.com.br/cupons" },
+          "url": "https://www.mercadolivre.com.br/cupons",
+          "selector": "div.coupon-card" },
         { "kind": "banners", "label": "campanhas-promo",
           "selector": "li.ui-search-layout__item, section" },
         { "kind": "cards",   "label": "cards-ofertas",

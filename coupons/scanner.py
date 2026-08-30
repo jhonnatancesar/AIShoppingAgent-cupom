@@ -10,17 +10,30 @@ Princípios:
 - Aprofundar (detalhe do produto) SOMENTE quando um card/oferta indicar cupom,
   limitado a ``scanner.max_product_details_per_store`` (economiza RAM/tempo).
 - Só persiste cupom com evidência oficial real da loja (regra absoluta).
-- Um único ``page`` reutilizado por loja dentro da rodada.
+- Uma ``page`` nova por loja, sempre no MESMO ``context`` PADRÃO do Edge
+  dedicado (``browser.contexts[0]``, nunca ``browser.new_context()`` --
+  achado real, TASK-106: um contexto novo é isolado tipo anônimo, sem os
+  cookies do perfil em disco onde um login manual foi feito). Contexto
+  nunca fechado; só a página, por loja.
 - Edge dedicado (``edge_transport.EdgeCdpProcess``) sobe UMA vez por rodada,
   reutilizado entre lojas, encerrado no finally -- nunca
   ``playwright.chromium.launch()`` gerenciado.
 - Bloqueio (403/429 ou marcadores) -> backoff daquela loja; falha isolada NÃO
   derruba as demais.
+- Fila, sempre: uma loja de cada vez, nunca em paralelo (`scan_all` faz
+  `await` sequencial). Ritmo humano/respeitoso entre interações
+  (``scanner.delay_between_requests_seconds``, antes de cada navegação) e
+  um cooldown maior só na troca de loja
+  (``scanner.cooldown_between_stores_seconds``) -- nunca uma técnica de
+  evasão anti-bot, só não bater as fontes rápido demais; sem pressa
+  nenhuma, a cadência já é de 1h/30min (``cadence.py``).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
+import unicodedata
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 
@@ -40,6 +53,16 @@ from .stores import (
 logger = logging.getLogger("coupons.scanner")
 
 _BLOCK_STATUSES = frozenset({403, 429})
+
+
+def _strip_accents(text: str) -> str:
+    """Remove acentos (NFKD + descarta marcas combinantes) para permitir
+    marcadores em config.json escritos em ASCII baterem contra texto real
+    acentuado, sem depender de normalizacao manual em cada marcador."""
+    return "".join(
+        ch for ch in unicodedata.normalize("NFKD", text)
+        if not unicodedata.combining(ch)
+    )
 
 
 class StoreBackoff:
@@ -66,6 +89,26 @@ class Scanner:
         self.scancfg = config.get("scanner", {})
         self.backoff = backoff
         self.max_details = int(self.scancfg.get("max_product_details_per_store", 3))
+        # Ritmo humano/respeitoso entre interações -- sem pressa nenhuma,
+        # a cadência já é de 1h/30min (cadence.py). Nunca é uma técnica de
+        # evasão anti-bot: é só não bater a fonte rápido demais.
+        self.request_delay_seconds = float(
+            self.scancfg.get("delay_between_requests_seconds", 5.0)
+        )
+        # Cooldown maior, exclusivo da troca de loja -- varredura já é
+        # sempre por fila (uma loja de cada vez, nunca em paralelo,
+        # `scan_all` abaixo faz `await` sequencial).
+        self.store_cooldown_seconds = float(
+            self.scancfg.get("cooldown_between_stores_seconds", 20.0)
+        )
+
+    async def _pace(self) -> None:
+        if self.request_delay_seconds > 0:
+            await asyncio.sleep(self.request_delay_seconds)
+
+    async def _store_cooldown(self) -> None:
+        if self.store_cooldown_seconds > 0:
+            await asyncio.sleep(self.store_cooldown_seconds)
 
     # ---- orquestração da rodada -------------------------------------------
 
@@ -83,8 +126,29 @@ class Scanner:
                 async with async_playwright() as p:
                     browser = await p.chromium.connect_over_cdp(cdp_url)
                     try:
+                        # Reaproveita o contexto PADRAO do perfil dedicado
+                        # (o mesmo onde login manual/cookies reais ficam
+                        # salvos) -- browser.new_context() criaria um
+                        # contexto isolado tipo anonimo, sem os cookies do
+                        # perfil em disco (achado real, TASK-106: login
+                        # manual no perfil nunca aparecia pro scanner por
+                        # causa disso). Contexto NUNCA fechado aqui -- e a
+                        # janela/perfil real do usuario.
+                        context = (
+                            browser.contexts[0] if browser.contexts
+                            else await browser.new_context(
+                                locale="pt-BR",
+                                timezone_id="America/Sao_Paulo",
+                                viewport={"width": 1280, "height": 800},
+                            )
+                        )
+                        first = True
                         for store_id, spec in self.stores.items():
-                            summary[store_id] = await self._scan_store(browser, spec)
+                            if not first:
+                                logger.info("Cooldown de %ss antes da próxima loja...", self.store_cooldown_seconds)
+                                await self._store_cooldown()
+                            first = False
+                            summary[store_id] = await self._scan_store(context, spec)
                     finally:
                         try:
                             # Desconecta a sessão Playwright; o processo do
@@ -105,7 +169,7 @@ class Scanner:
         )
         return summary
 
-    async def _scan_store(self, browser: Any, spec: StoreSpec) -> Dict[str, Any]:
+    async def _scan_store(self, context: Any, spec: StoreSpec) -> Dict[str, Any]:
         store_id = spec.id
         result: Dict[str, Any] = {
             "store_id": store_id,
@@ -120,13 +184,11 @@ class Scanner:
             logger.info("Loja %s em backoff de bloqueio; pulando.", store_id)
             return result
 
-        context = page = None
+        page = None
         try:
-            context = await browser.new_context(
-                locale="pt-BR",
-                timezone_id="America/Sao_Paulo",
-                viewport={"width": 1280, "height": 800},
-            )
+            # Aba nova por loja (estado de navegação limpo entre lojas),
+            # no MESMO contexto/perfil compartilhado (cookies/login reais
+            # preservados) -- nunca um contexto isolado novo.
             page = await context.new_page()
 
             product_hints: List[Tuple[str, str]] = []  # (url, texto_do_card)
@@ -153,11 +215,11 @@ class Scanner:
             result["status"] = "error"
             result["error"] = str(e)
         finally:
-            if context is not None:
+            if page is not None:
                 try:
-                    await context.close()
+                    await page.close()
                 except Exception:
-                    logger.warning("Loja %s: contexto não pôde ser fechado.", store_id)
+                    logger.warning("Loja %s: aba não pôde ser fechada.", store_id)
 
         return result
 
@@ -182,14 +244,19 @@ class Scanner:
         rec = self._new_record(src, url)
         timeout = self.pw_cfg.get("navigation_timeout_ms", 30000)
         try:
+            await self._pace()
             resp = await page.goto(url, timeout=timeout, wait_until="domcontentloaded")
             rec["status"] = resp.status if resp else None
             if await self._mark_blocked(page, spec.id, rec):
                 return rec
             # Nível de página inteira
             await self._examine_body_level(page, spec, src.kind, url, rec)
-            # Se a fonte tem seletor (busca, cards, etc.), extrai os cards/resultados
-            if src.selector and src.kind in ("search", "cards", "banners"):
+            # Se a fonte tem seletor (busca, cards, etc.), extrai os cards/resultados.
+            # "coupons" entra aqui pra lojas que tem cards REAIS de cupom na
+            # própria página de cupons (ex.: Mercado Livre, div.coupon-card) --
+            # outras lojas com kind=coupons sem selector (Amazon/Kabum/Magalu
+            # hoje) não são afetadas, o gate é sempre `src.selector`.
+            if src.selector and src.kind in ("search", "cards", "banners", "coupons"):
                 await self._examine_cards(page, spec, src, url, rec, product_hints)
         except Exception as e:
             rec["status"] = "error"
@@ -272,6 +339,7 @@ class Scanner:
             }
             timeout = self.pw_cfg.get("navigation_timeout_ms", 30000)
             try:
+                await self._pace()
                 resp = await page.goto(href, timeout=timeout, wait_until="domcontentloaded")
                 rec["status"] = resp.status if resp else None
                 if await self._mark_blocked(page, store_id, rec):
@@ -311,8 +379,12 @@ class Scanner:
         return False
 
     def _page_has_block_marker(self, title: str, body: str) -> bool:
-        haystack = (title + "\n" + body).lower()
-        return any(m in haystack for m in self.block_markers)
+        # Sem strip de acento, "verifique que voce" (config.json, ASCII)
+        # nunca bateria contra o texto real acentuado da pagina
+        # ("verifique que voce" com cedilha/circunflexo) -- normaliza os
+        # dois lados (NFKD + remove marcas combinantes) antes de comparar.
+        haystack = _strip_accents((title + "\n" + body).lower())
+        return any(_strip_accents(m) in haystack for m in self.block_markers)
 
     async def _page_title(self, page: Any) -> str:
         try:

@@ -55,6 +55,8 @@ def build_search_url(store_id: str, term: str) -> Optional[str]:
         return f"https://www.kabum.com.br/busca/{slug}?facet_filters={facet}"
     if store_id == "amazon":
         return f"https://www.amazon.com.br/s?k={quote_plus(term)}"
+    if store_id == "magalu":
+        return f"https://www.magazineluiza.com.br/busca/{quote_plus(term)}/"
     return None
 
 
