@@ -111,10 +111,6 @@
         { "kind": "coupons", "label": "area-cupons",
           "url": "https://www.mercadolivre.com.br/cupons",
           "selector": "div.coupon-card" },
-        { "kind": "banners", "label": "campanhas-promo",
-          "selector": "li.ui-search-layout__item, section" },
-        { "kind": "cards",   "label": "cards-ofertas",
-          "selector": "li.ui-search-layout__item" },
         { "kind": "product", "label": "detalhe-produto" }
       ]
     }
