@@ -46,14 +46,14 @@ def load_config() -> dict:
         return json.load(f)
 
 
-def sample_firefox_mb() -> int:
+def sample_edge_mb() -> int:
     if not HAS_PSUTIL:
         return 0
     total = 0
     for proc in psutil.process_iter(["name"]):
         try:
             nm = (proc.info.get("name") or "").lower()
-            if "firefox" in nm:
+            if "msedge" in nm:
                 total += proc.memory_info().rss
         except Exception:
             pass
@@ -63,7 +63,7 @@ def sample_firefox_mb() -> int:
 async def measure_peak(stop: asyncio.Event) -> int:
     peak = 0
     while not stop.is_set():
-        peak = max(peak, sample_firefox_mb())
+        peak = max(peak, sample_edge_mb())
         try:
             await asyncio.wait_for(stop.wait(), timeout=1.0)
         except asyncio.TimeoutError:
@@ -153,7 +153,7 @@ async def run_once(store_ids: list[str]) -> int:
     print("\n===== CONSOLIDADO =====")
     print(f"total de cupons persistidos: {summary.get('total_coupons_persisted')}")
     if peak is not None:
-        print(f"pico de RAM do Firefox (todas as abas): ~{peak} MB")
+        print(f"pico de RAM do Edge dedicado (todos os processos msedge.exe): ~{peak} MB")
     else:
         print("RAM: psutil não instalado; pulei a medição. (opcional)")
 
@@ -168,5 +168,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     ids = [s.strip().lower() for s in args.stores.split(",") if s.strip()]
     # NOTA: usamos o loop padrão; o WindowsSelectorEventLoopPolicy não suporta
-    # subprocess (playwright lança o Firefox), então NÃO o forçamos.
+    # subprocess (EdgeCdpProcess lança o Edge dedicado, e o driver do
+    # Playwright usa subprocess para connect_over_cdp), então NÃO o forçamos.
     sys.exit(asyncio.run(run_once(ids)))

@@ -125,19 +125,23 @@ curl -s -X POST http://127.0.0.1:8090/control/promo \
 Respostas: `200` confirma o estado; `400` = modo inválido / janela com
 `end <= start`; `401` = token ausente/errado.
 
-## Smoke test (na sua máquina Windows)
+## Smoke test
 
-```bash
-venv  # ou .venv criado com python -m venv
-pip install -r requirements.txt
-playwright install firefox      # uma vez
+```powershell
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
 copy .env.example .env          # defina o AUTH_TOKEN
-python worker.py --once         # uma rodada imediata
+.venv\Scripts\python.exe smoke_test.py --stores kabum   # ou amazon,kabum,magalu,mercadolivre
 ```
 
-`--once` imprime o resumo da varredura por loja e grava em `data/worker.db`
-(SQLite). Pode não haver cupom (vazio = varredura ok; sem evidência **não**
-grava cupom — isso é o comportamento correto).
+Não precisa de `playwright install` — nenhum navegador é baixado, o
+smoke test usa o Edge real já instalado no Windows (`coupons/edge_transport.py`
+descobre o caminho automaticamente).
+
+`smoke_test.py` imprime o resumo da varredura por loja e usa um banco SQLite
+temporário isolado por execução. Pode não haver cupom (vazio = varredura ok;
+sem evidência **não** grava cupom — isso é o comportamento correto).
+`worker.py --once` faz o mesmo, mas grava em `data/worker.db` (persistente).
 
 ## Próximo passo (quando você informar o banco)
 
