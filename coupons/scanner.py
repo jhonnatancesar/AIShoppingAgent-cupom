@@ -215,7 +215,21 @@ class Scanner:
 
             product_hints: List[Tuple[str, str]] = []  # (url, texto_do_card)
 
-            for src in spec.sources:
+            # Fontes de config.json + fontes auto-adotadas (descoberta
+            # confirmada com evidência real em rodada anterior, sem
+            # precisar editar config.json) -- mesmo tratamento das duas.
+            # Uma adotada cuja URL final bateu com uma já configurada não
+            # duplica (mesma página não é escaneada duas vezes).
+            configured_urls = {src.url for src in spec.sources if src.url}
+            adopted = self.store.get_adopted_candidates(store_id)
+            dynamic_sources = [
+                SourceSpec(kind="banners", label=f"auto:{(label or url)[:40]}", url=url)
+                for url, label in adopted
+                if url not in configured_urls
+            ]
+            all_sources = list(spec.sources) + dynamic_sources
+
+            for src in all_sources:
                 if src.kind == "product":
                     continue  # aprofundamento: tratado ao final, sob demanda
                 records = await self._scan_source(page, spec, src, product_hints)
@@ -329,7 +343,8 @@ class Scanner:
         for coupon in build_coupons(spec.id, src_kind, body, url):
             rec["evidence"].append(coupon.raw_rule_text or coupon.evidence)
             self._persist(coupon, rec)
-        await self._discover_candidate_sources(page, spec)
+        adopted_count = await self._discover_candidate_sources(page, spec)
+        rec["persisted"] += adopted_count
 
     # ---- descoberta de fontes novas (ex.: badge/aba "9.9" numa promoção) ---
 
@@ -356,20 +371,24 @@ class Scanner:
     }
     """
 
-    async def _discover_candidate_sources(self, page: Any, spec: StoreSpec) -> None:
+    async def _discover_candidate_sources(self, page: Any, spec: StoreSpec) -> int:
         """Acha links que PARECEM levar a uma área de cupom (texto/href com
         "cupom", "liquida", "promoção" ou um padrão tipo "9.9"/"11.11") e
-        ainda não estão configurados como fonte dessa loja -- não são
-        evidência de cupom (nunca vira ``Coupon``), só um candidato pra
-        você revisar e, se fizer sentido, promover a fonte de verdade em
+        ainda não estão configurados como fonte dessa loja. Auto-configura
+        de verdade: visita o link AGORA (mesma rodada) pra confirmar
+        evidência real antes de adotar -- nunca confia só no texto do
+        link. Uma vez adotado, a fonte passa a ser escaneada toda rodada
+        sozinha (``get_adopted_candidates``), sem precisar editar
         config.json. Detecta a abertura de áreas novas (ex.: badge "9.9"
-        que só existe durante promoção), sem inventar/decidir nada sozinho."""
+        que só existe durante promoção). Devolve quantos cupons foram
+        persistidos por adoções desta chamada."""
         known_urls = {src.url for src in spec.sources if src.url}
         try:
             candidates = await page.evaluate(self._CANDIDATE_LINK_JS)
         except Exception:
-            return
+            return 0
         base = self._page_url(page)
+        persisted_total = 0
         for c in candidates:
             href = c.get("href") or ""
             if not href:
@@ -377,13 +396,77 @@ class Scanner:
             full_url = urljoin(base, href) if not href.startswith("http") else href
             if full_url in known_urls:
                 continue
-            is_new = self.store.record_candidate(spec.id, full_url, c.get("text") or "")
-            if is_new:
+            label_text = c.get("text") or ""
+            status = self.store.record_candidate(spec.id, label_text, full_url)
+            if status == "new":
                 logger.info(
-                    "Loja %s: possível fonte de cupom NOVA (ainda não configurada): "
-                    "%r -> %s -- revise e considere adicionar em config.json.",
-                    spec.id, c.get("text"), full_url,
+                    "Loja %s: possível fonte de cupom NOVA (ainda não configurada): %r -> %s -- verificando agora...",
+                    spec.id, label_text, full_url,
                 )
+            if status != "adopted":
+                persisted_total += await self._verify_and_maybe_adopt(
+                    page.context, spec, full_url, label_text, known_urls
+                )
+        return persisted_total
+
+    async def _verify_and_maybe_adopt(self, context: Any, spec: StoreSpec,
+                                      url: str, label_text: str,
+                                      known_urls: set) -> int:
+        """Visita o candidato numa aba própria e roda a MESMA extração de
+        evidência já usada em qualquer fonte -- só adota (passa a
+        escanear sozinho nas próximas rodadas) se achar cupom real de
+        verdade. Sem evidência, fica ``rejected`` mas continua elegível
+        pra reverificação (a promoção pode ainda não ter começado, não é
+        rejeição definitiva). Devolve quantos cupons foram persistidos."""
+        await self._pace()
+        trial_page = None
+        try:
+            trial_page = await context.new_page()
+            timeout = self.pw_cfg.get("navigation_timeout_ms", 30000)
+            resp = await trial_page.goto(url, timeout=timeout, wait_until="domcontentloaded")
+            status_code = resp.status if resp else None
+            if status_code in _BLOCK_STATUSES:
+                self.store.mark_candidate_status(spec.id, label_text, "rejected")
+                return 0
+            await self._scroll_to_load(trial_page)
+            # URL final DEPOIS de resolver qualquer redirecionamento (ex.:
+            # link de rastreamento click1.mercadolivre.com.br/.../count) --
+            # é isso que fica guardado como fonte adotada, nunca o link
+            # frágil original.
+            final_url = self._page_url(trial_page) or url
+            if final_url in known_urls:
+                # O redirecionamento levou pra uma fonte JÁ configurada em
+                # config.json -- não adota de novo (evita escanear a mesma
+                # página duas vezes por rodada), mas marca como adotada
+                # pra parar de tentar re-verificar isso toda hora.
+                self.store.mark_candidate_status(spec.id, label_text, "adopted", resolved_url=final_url)
+                logger.info(
+                    "Loja %s: candidato %r resolve pra fonte já configurada (%s) -- não duplicando.",
+                    spec.id, label_text, final_url,
+                )
+                return 0
+            body = await self._body_text(trial_page)
+            found = build_coupons(spec.id, "banners", body, final_url)
+            if found:
+                for coupon in found:
+                    self.store.upsert(coupon)
+                self.store.mark_candidate_status(spec.id, label_text, "adopted", resolved_url=final_url)
+                logger.info(
+                    "Loja %s: fonte NOVA ADOTADA automaticamente (evidência real confirmada, %d cupom(ns)): %r -> %s",
+                    spec.id, len(found), label_text, final_url,
+                )
+                return len(found)
+            self.store.mark_candidate_status(spec.id, label_text, "rejected")
+            return 0
+        except Exception as e:
+            logger.info("Loja %s: falha ao verificar candidato %r: %s", spec.id, label_text, e)
+            return 0
+        finally:
+            if trial_page is not None:
+                try:
+                    await trial_page.close()
+                except Exception:
+                    pass
 
     async def _examine_cards(self, page: Any, spec: StoreSpec, src: SourceSpec,
                              url: str, rec: Dict,

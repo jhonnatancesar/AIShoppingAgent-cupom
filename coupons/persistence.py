@@ -64,7 +64,14 @@ class CouponStore:
     def upsert(self, coupon: Coupon) -> None:
         raise NotImplementedError
 
-    def record_candidate(self, store_id: str, url: str, label_text: str) -> bool:
+    def record_candidate(self, store_id: str, label_text: str, url: str) -> str:
+        raise NotImplementedError
+
+    def mark_candidate_status(self, store_id: str, label_text: str, status: str,
+                              resolved_url: Optional[str] = None) -> None:
+        raise NotImplementedError
+
+    def get_adopted_candidates(self, store_id: str):
         raise NotImplementedError
 
     def expire_stale(self, store_id: str, before_iso: str) -> int:
@@ -107,14 +114,21 @@ class SqliteCouponStore(CouponStore):
         value TEXT NOT NULL
     );
 
+    -- Chave por label_text (texto do badge/botão, estável), não por url:
+    -- achado real (Mercado Livre) -- o mesmo banner "AQUI TEM 9.9" gera um
+    -- link de RASTREAMENTO diferente a cada carregamento de página
+    -- (click1.mercadolivre.com.br/.../count?a=<token>), o que faria o
+    -- mesmo candidato ser "descoberto" de novo a cada rodada se a chave
+    -- fosse a url. `url` guarda o destino FINAL já resolvido (depois do
+    -- redirecionamento), atualizado quando o candidato é adotado.
     CREATE TABLE IF NOT EXISTS source_candidates (
         store_id      TEXT NOT NULL,
+        label_text    TEXT NOT NULL,
         url           TEXT NOT NULL,
-        label_text    TEXT,
         first_seen_at TEXT NOT NULL,
         last_seen_at  TEXT NOT NULL,
         status        TEXT NOT NULL DEFAULT 'new',
-        PRIMARY KEY (store_id, url)
+        PRIMARY KEY (store_id, label_text)
     );
     """
 
@@ -168,30 +182,80 @@ class SqliteCouponStore(CouponStore):
 
     # ---- descoberta de fontes (abas/botoes de cupom novos, ex.: promo) -----
 
-    def record_candidate(self, store_id: str, url: str, label_text: str) -> bool:
-        """Registra um link candidato a fonte de cupom (achado por palavra-
-        chave, nunca confirmado como cupom real) -- pra você notar quando a
-        loja abre uma área nova (ex.: badge "9.9") que ainda não está em
-        config.json. Devolve True só na PRIMEIRA vez que essa URL aparece
-        (pra logar sem repetir o alarme toda rodada)."""
+    def record_candidate(self, store_id: str, label_text: str, url: str) -> str:
+        """Registra/atualiza um link candidato a fonte de cupom (achado por
+        palavra-chave, nunca confirmado sozinho como cupom real). Chave é
+        ``(store_id, label_text)`` -- não a url, que pode ser um link de
+        rastreamento com token novo a cada carregamento (achado real,
+        Mercado Livre). Devolve o status ATUAL depois da operação:
+        ``"new"`` só na primeira vez que esse label aparece (chamador
+        decide o que fazer -- ex.: verificar e talvez adotar);
+        ``"adopted"``/``"rejected"`` nas vezes seguintes, conforme a
+        última verificação real."""
         now = _utcnow().isoformat()
         cur = self._conn.execute(
-            "SELECT 1 FROM source_candidates WHERE store_id = ? AND url = ?",
-            (store_id, url),
+            "SELECT status FROM source_candidates WHERE store_id = ? AND label_text = ?",
+            (store_id, label_text),
         )
-        is_new = cur.fetchone() is None
-        self._conn.execute(
-            """
-            INSERT INTO source_candidates (store_id, url, label_text, first_seen_at, last_seen_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT (store_id, url) DO UPDATE SET
-                last_seen_at = excluded.last_seen_at,
-                label_text   = excluded.label_text
-            """,
-            (store_id, url, label_text, now, now),
-        )
+        row = cur.fetchone()
+        if row is None:
+            self._conn.execute(
+                """
+                INSERT INTO source_candidates
+                    (store_id, label_text, url, first_seen_at, last_seen_at, status)
+                VALUES (?, ?, ?, ?, ?, 'new')
+                """,
+                (store_id, label_text, url, now, now),
+            )
+            self._conn.commit()
+            return "new"
+        # Atualiza a url (pode ter mudado -- token de rastreamento novo)
+        # só enquanto ainda não foi adotada; depois de adotada, a url
+        # guardada é o destino final já resolvido -- não sobrescrever com
+        # um link de rastreamento efêmero de uma nova varredura.
+        if row["status"] != "adopted":
+            self._conn.execute(
+                "UPDATE source_candidates SET last_seen_at = ?, url = ? WHERE store_id = ? AND label_text = ?",
+                (now, url, store_id, label_text),
+            )
+        else:
+            self._conn.execute(
+                "UPDATE source_candidates SET last_seen_at = ? WHERE store_id = ? AND label_text = ?",
+                (now, store_id, label_text),
+            )
         self._conn.commit()
-        return is_new
+        return row["status"]
+
+    def mark_candidate_status(self, store_id: str, label_text: str, status: str,
+                              resolved_url: Optional[str] = None) -> None:
+        """Grava o resultado REAL de uma verificação (adotado com evidência
+        confirmada, ou rejeitado por não ter achado nada dessa vez --
+        continua elegível pra reverificação em rodadas futuras, a
+        promoção pode simplesmente ainda não ter começado). Ao adotar,
+        ``resolved_url`` é o destino FINAL já resolvido (depois de
+        qualquer redirecionamento) -- substitui o link de rastreamento
+        original, que pode não ser mais válido na próxima rodada."""
+        if resolved_url:
+            self._conn.execute(
+                "UPDATE source_candidates SET status = ?, url = ? WHERE store_id = ? AND label_text = ?",
+                (status, resolved_url, store_id, label_text),
+            )
+        else:
+            self._conn.execute(
+                "UPDATE source_candidates SET status = ? WHERE store_id = ? AND label_text = ?",
+                (status, store_id, label_text),
+            )
+        self._conn.commit()
+
+    def get_adopted_candidates(self, store_id: str):
+        """URLs já promovidas a fonte automática (evidência real confirmada
+        numa verificação anterior) -- passam a ser escaneadas toda rodada,
+        sem precisar de config.json."""
+        cur = self._conn.execute(
+            "SELECT url, label_text FROM source_candidates WHERE store_id = ? AND status = 'adopted'",
+            (store_id,),
+        )
+        return [(r["url"], r["label_text"] or "") for r in cur.fetchall()]
 
     # ---- expiracao por ausencia (cupom que sumiu de uma rodada pra outra) --
 
