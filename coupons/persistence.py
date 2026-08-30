@@ -64,6 +64,12 @@ class CouponStore:
     def upsert(self, coupon: Coupon) -> None:
         raise NotImplementedError
 
+    def record_candidate(self, store_id: str, url: str, label_text: str) -> bool:
+        raise NotImplementedError
+
+    def expire_stale(self, store_id: str, before_iso: str) -> int:
+        raise NotImplementedError
+
     def close(self) -> None:
         raise NotImplementedError
 
@@ -99,6 +105,16 @@ class SqliteCouponStore(CouponStore):
     CREATE TABLE IF NOT EXISTS control (
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS source_candidates (
+        store_id      TEXT NOT NULL,
+        url           TEXT NOT NULL,
+        label_text    TEXT,
+        first_seen_at TEXT NOT NULL,
+        last_seen_at  TEXT NOT NULL,
+        status        TEXT NOT NULL DEFAULT 'new',
+        PRIMARY KEY (store_id, url)
     );
     """
 
@@ -149,6 +165,51 @@ class SqliteCouponStore(CouponStore):
             ),
         )
         self._conn.commit()
+
+    # ---- descoberta de fontes (abas/botoes de cupom novos, ex.: promo) -----
+
+    def record_candidate(self, store_id: str, url: str, label_text: str) -> bool:
+        """Registra um link candidato a fonte de cupom (achado por palavra-
+        chave, nunca confirmado como cupom real) -- pra você notar quando a
+        loja abre uma área nova (ex.: badge "9.9") que ainda não está em
+        config.json. Devolve True só na PRIMEIRA vez que essa URL aparece
+        (pra logar sem repetir o alarme toda rodada)."""
+        now = _utcnow().isoformat()
+        cur = self._conn.execute(
+            "SELECT 1 FROM source_candidates WHERE store_id = ? AND url = ?",
+            (store_id, url),
+        )
+        is_new = cur.fetchone() is None
+        self._conn.execute(
+            """
+            INSERT INTO source_candidates (store_id, url, label_text, first_seen_at, last_seen_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (store_id, url) DO UPDATE SET
+                last_seen_at = excluded.last_seen_at,
+                label_text   = excluded.label_text
+            """,
+            (store_id, url, label_text, now, now),
+        )
+        self._conn.commit()
+        return is_new
+
+    # ---- expiracao por ausencia (cupom que sumiu de uma rodada pra outra) --
+
+    def expire_stale(self, store_id: str, before_iso: str) -> int:
+        """Marca como 'expired' todo cupom `active` dessa loja que não foi
+        confirmado (upsert) desde `before_iso` -- ou seja, sumiu da loja
+        nesta rodada. Nunca decide isso durante o parsing (evidência
+        literal só confirma presença); comparação de histórico real no
+        banco, sem IA. Devolve quantos foram marcados."""
+        cur = self._conn.execute(
+            """
+            UPDATE coupons SET status = 'expired'
+            WHERE store_id = ? AND status = 'active' AND last_seen_at < ?
+            """,
+            (store_id, before_iso),
+        )
+        self._conn.commit()
+        return cur.rowcount
 
     # ---- controle mutável (janela promocional) -----------------------------
 

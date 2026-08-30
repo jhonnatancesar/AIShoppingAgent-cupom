@@ -34,6 +34,7 @@ import asyncio
 import logging
 import time
 import unicodedata
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 
@@ -204,6 +205,7 @@ class Scanner:
             logger.info("Loja %s em backoff de bloqueio; pulando.", store_id)
             return result
 
+        round_start = datetime.now(timezone.utc).isoformat()
         page = None
         try:
             # Aba nova por loja (estado de navegação limpo entre lojas),
@@ -230,6 +232,13 @@ class Scanner:
             result["coupons_persisted_count"] = sum(
                 s.get("persisted", 0) for s in result.get("sources", [])
             )
+            # Cupom "active" que não foi confirmado (upsert) nesta rodada
+            # sumiu da loja -- vira "expired". Só quando a rodada completou
+            # de verdade (nunca após bloqueio/erro, que não prova ausência).
+            if result["status"] == "ok":
+                expired = self.store.expire_stale(store_id, round_start)
+                if expired:
+                    logger.info("Loja %s: %d cupom(ns) marcado(s) como expirado(s) (sumiram desta rodada).", store_id, expired)
         except Exception as e:
             logger.error("Loja %s: erro na varredura: %s", store_id, e)
             result["status"] = "error"
@@ -320,6 +329,61 @@ class Scanner:
         for coupon in build_coupons(spec.id, src_kind, body, url):
             rec["evidence"].append(coupon.raw_rule_text or coupon.evidence)
             self._persist(coupon, rec)
+        await self._discover_candidate_sources(page, spec)
+
+    # ---- descoberta de fontes novas (ex.: badge/aba "9.9" numa promoção) ---
+
+    _CANDIDATE_LINK_JS = r"""
+    () => {
+      const rx = /cupom|liquida|promo[çc][ãa]o|\b\d{1,2}\.\d{1,2}\b/i;
+      // Link de produto individual (card inteiro clicavel) nunca e
+      // candidato -- so badges/botoes/abas curtos de entrada de secao.
+      const productPattern = /\/dp\/|\/gp\/product\/|\/produto\/\d|\/p\/MLB|\/up\/MLB|MLB-?\d{6,}/i;
+      const out = [];
+      const seen = new Set();
+      for (const a of document.querySelectorAll('a[href]')) {
+        const text = (a.innerText || '').trim();
+        if (text.length === 0 || text.length > 60) continue;
+        const href = a.getAttribute('href') || '';
+        if (!rx.test(text) && !rx.test(href)) continue;
+        if (!href || href.startsWith('#') || href.startsWith('javascript:')) continue;
+        if (productPattern.test(href)) continue;
+        if (seen.has(href)) continue;
+        seen.add(href);
+        out.push({href, text: text.slice(0, 120)});
+      }
+      return out.slice(0, 40);
+    }
+    """
+
+    async def _discover_candidate_sources(self, page: Any, spec: StoreSpec) -> None:
+        """Acha links que PARECEM levar a uma área de cupom (texto/href com
+        "cupom", "liquida", "promoção" ou um padrão tipo "9.9"/"11.11") e
+        ainda não estão configurados como fonte dessa loja -- não são
+        evidência de cupom (nunca vira ``Coupon``), só um candidato pra
+        você revisar e, se fizer sentido, promover a fonte de verdade em
+        config.json. Detecta a abertura de áreas novas (ex.: badge "9.9"
+        que só existe durante promoção), sem inventar/decidir nada sozinho."""
+        known_urls = {src.url for src in spec.sources if src.url}
+        try:
+            candidates = await page.evaluate(self._CANDIDATE_LINK_JS)
+        except Exception:
+            return
+        base = self._page_url(page)
+        for c in candidates:
+            href = c.get("href") or ""
+            if not href:
+                continue
+            full_url = urljoin(base, href) if not href.startswith("http") else href
+            if full_url in known_urls:
+                continue
+            is_new = self.store.record_candidate(spec.id, full_url, c.get("text") or "")
+            if is_new:
+                logger.info(
+                    "Loja %s: possível fonte de cupom NOVA (ainda não configurada): "
+                    "%r -> %s -- revise e considere adicionar em config.json.",
+                    spec.id, c.get("text"), full_url,
+                )
 
     async def _examine_cards(self, page: Any, spec: StoreSpec, src: SourceSpec,
                              url: str, rec: Dict,

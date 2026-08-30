@@ -185,6 +185,26 @@ def _context_window(text: str, raw: str, pad: int = 140) -> str:
     return text[max(0, idx - pad): idx + len(raw) + pad]
 
 
+# Sinal de status/validade -- genérico, vale pra qualquer loja (não é
+# fraseado específico de uma loja só). Nunca decide status/valid_until
+# estruturado sozinho (isso seria inferir data relativa tipo "amanhã");
+# só anexa o texto LITERAL, quando presente, ao raw_rule_text.
+_STATUS_HINT_PATTERNS = (
+    re.compile(r"est[aá]\s+esgotando\S*", re.I),
+    re.compile(r"esgotad[oa]\S*", re.I),
+    re.compile(r"vence\s+[^\n.!]{0,40}", re.I),
+    re.compile(r"v[aá]lido\s+at[eé]\s+[^\n.!]{0,40}", re.I),
+)
+
+
+def _find_status_hint(text: str) -> Optional[str]:
+    for pattern in _STATUS_HINT_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            return m.group(0).strip()
+    return None
+
+
 def infer_scope(source_kind: str, context_text: str, reference_url: Optional[str]):
     """Define (scope_kind, scope_reference) a partir do contexto da fonte.
 
@@ -208,9 +228,16 @@ def build_coupons(store_id: str, source_kind: str, text: str,
                   reference_url: Optional[str]) -> List[Coupon]:
     """Constrói Coupons com escopo correto a partir do texto de uma fonte."""
     coupons: List[Coupon] = []
+    status_hint = _find_status_hint(text)  # mesmo card/texto, não por achado
     for f in find_coupon_markers(store_id, text):
         scope_kind, scope_ref = infer_scope(
             source_kind, _context_window(text, f.get("raw_rule_text")), reference_url)
+        raw_rule_text = f.get("raw_rule_text") or ""
+        if status_hint:
+            # Texto LITERAL, nunca inferido (ex.: "Está esgotando!",
+            # "Vence amanhã", "Válido até 31/12") -- não decide status
+            # estruturado nem calcula data relativa, só anexa a evidência.
+            raw_rule_text = f"{raw_rule_text} | {status_hint}"
         coupons.append(Coupon(
             store_id=store_id,
             code=f.get("code"),
@@ -221,7 +248,7 @@ def build_coupons(store_id: str, source_kind: str, text: str,
             evidence=_evidence_key(store_id, source_kind, f, reference_url),
             scope_kind=scope_kind,
             scope_reference=scope_ref,
-            raw_rule_text=f.get("raw_rule_text"),
+            raw_rule_text=raw_rule_text,
             source_url=reference_url or "",
         ))
     return coupons
