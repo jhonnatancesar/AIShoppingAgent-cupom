@@ -8,8 +8,8 @@
   },
 
   "playwright": {
-    "_comentario": "Edge real do sistema via CDP dedicado, nunca navegador gerenciado pelo Playwright. edge_executable=null usa a descoberta automatica (Program Files); so preencha se o Edge estiver em outro caminho. edge_cdp_port DEVE ser diferente da porta do collection_worker principal (9223 em producao) para os dois nunca colidirem na mesma maquina.",
-    "headless": true,
+    "_comentario": "Edge real do sistema via CDP dedicado, nunca navegador gerenciado pelo Playwright. edge_executable=null usa a descoberta automatica (Program Files); so preencha se o Edge estiver em outro caminho. edge_cdp_port DEVE ser diferente da porta do collection_worker principal (9223 em producao) para os dois nunca colidirem na mesma maquina. headless=false por achado real (TASK-106): headless correlaciona com bloqueio 403 em Magalu/Mercado Livre -- mesma escolha ja validada pelo collection_worker principal (--start-minimized, nunca headless).",
+    "headless": false,
     "navigation_timeout_ms": 30000,
     "action_timeout_ms": 15000,
     "edge_cdp_port": 9224,

@@ -90,7 +90,7 @@ class EdgeCdpProcess:
         port: int = 9224,
         executable: Optional[str] = None,
         profile_dir: Optional[Path] = None,
-        headless: bool = True,
+        headless: bool = False,
         startup_timeout_seconds: float = 30.0,
         probe_interval_seconds: float = 0.5,
     ) -> None:
@@ -140,7 +140,14 @@ class EdgeCdpProcess:
             "--disable-background-mode",
         ]
         if self._headless:
+            # Achado real (validado nesta mesma pasta, TASK-106): headless
+            # correlaciona com bloqueio 403 em Magalu/Mercado Livre que não
+            # acontece com janela real. O collection_worker principal
+            # (EdgeCdpSupervisor, TASK-109) nunca usa headless -- só
+            # --start-minimized, mesma escolha aqui por padrão.
             arguments.append("--headless=new")
+        else:
+            arguments.append("--start-minimized")
         arguments.append("about:blank")
 
         creationflags = 0
