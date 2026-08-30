@@ -18,10 +18,12 @@
   },
 
   "scanner": {
-    "_comentario": "Limita o aprofundamento p/ economizar RAM/tempo/requisicoes. So aprofunda (detalhe de produto) quando ha indicio de cupom. Varredura ja e sempre por fila, uma loja de cada vez, nunca paralelo. delay_between_requests_seconds: pausa antes de cada navegacao (fonte, produto aprofundado) dentro da MESMA loja. cooldown_between_stores_seconds: pausa maior, so na troca de loja. Ritmo humano/respeitoso, sem pressa nenhuma -- cadencia ja e de 1h/30min. Pode aumentar a vontade.",
+    "_comentario": "Limita o aprofundamento p/ economizar RAM/tempo/requisicoes. So aprofunda (detalhe de produto) quando ha indicio de cupom. Varredura ja e sempre por fila, uma loja de cada vez, nunca paralelo. delay_between_requests_seconds: pausa antes de cada navegacao (fonte, produto aprofundado) dentro da MESMA loja. cooldown_between_stores_seconds: pausa maior, so na troca de loja. scroll_steps_before_cards/scroll_pause_seconds: rola a pagina antes de extrair cards, pra carregar carrosseis/listas lazy-load (achado real ML: so 2 de 23 cards de cupom apareciam sem rolar). Ritmo humano/respeitoso, sem pressa nenhuma -- cadencia ja e de 1h/30min. Pode aumentar a vontade.",
     "max_product_details_per_store": 3,
     "delay_between_requests_seconds": 5,
-    "cooldown_between_stores_seconds": 20
+    "cooldown_between_stores_seconds": 20,
+    "scroll_steps_before_cards": 4,
+    "scroll_pause_seconds": 1.5
   },
 
   "retry": {

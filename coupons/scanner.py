@@ -101,6 +101,13 @@ class Scanner:
         self.store_cooldown_seconds = float(
             self.scancfg.get("cooldown_between_stores_seconds", 20.0)
         )
+        # Carrosséis/listas com lazy-load (ex.: Mercado Livre: só 2 de 23
+        # cards de cupom aparecem sem rolar) -- rola devagar antes de
+        # extrair cards, achado real 2026-08-30.
+        self.scroll_steps = int(self.scancfg.get("scroll_steps_before_cards", 4))
+        self.scroll_pause_seconds = float(
+            self.scancfg.get("scroll_pause_seconds", 1.5)
+        )
 
     async def _pace(self) -> None:
         if self.request_delay_seconds > 0:
@@ -109,6 +116,19 @@ class Scanner:
     async def _store_cooldown(self) -> None:
         if self.store_cooldown_seconds > 0:
             await asyncio.sleep(self.store_cooldown_seconds)
+
+    async def _scroll_to_load(self, page: Any) -> None:
+        """Rola a página devagar antes de extrair cards, pra carregar
+        conteúdo lazy-load de carrosséis/listas longas -- sem isso,
+        seletores só enxergam o que já está na primeira dobra."""
+        if self.scroll_steps <= 0:
+            return
+        for _ in range(self.scroll_steps):
+            try:
+                await page.mouse.wheel(0, 1500)
+            except Exception:
+                break
+            await asyncio.sleep(self.scroll_pause_seconds)
 
     # ---- orquestração da rodada -------------------------------------------
 
@@ -306,6 +326,7 @@ class Scanner:
                              product_hints: List[Tuple[str, str]]) -> None:
         """Nível de cards: cada card com indicação de cupom vira observação de
         escopo 'product' e candidato a aprofundamento."""
+        await self._scroll_to_load(page)
         try:
             cards = await page.query_selector_all(src.selector)
         except Exception:
