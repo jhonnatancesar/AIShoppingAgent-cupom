@@ -7,3 +7,4 @@ playwright>=1.49
 aiohttp>=3.9
 python-dotenv>=1.0
 tzdata>=2024.1   # base IANA p/ zoneinfo em qualquer plataforma (inclui America/Sao_Paulo)
+psycopg[binary]>=3.2   # PostgresCouponStore -- mesmo driver já usado pelo GG Oferta

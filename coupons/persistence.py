@@ -11,11 +11,21 @@ Quando o usuário informar as credenciais, entra a ``PostgresCouponStore``
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
+
+logger = logging.getLogger("coupons.persistence")
+
+
+class CouponStoreIntegrationError(RuntimeError):
+    """Erro de integração entre o Coupon Worker e o Postgres do GG Oferta
+    -- nunca um erro de dado do próprio cupom. Levantado quando algo que
+    o worker presume já existir no GG (hoje: a loja) não existe -- nunca
+    inventa/cria automaticamente do lado do worker."""
 
 
 def _utcnow() -> datetime:
@@ -311,6 +321,179 @@ class SqliteCouponStore(CouponStore):
         self._conn.close()
 
 
-def open_coupon_store(db_path: str) -> CouponStore:
-    """Factory: hoje só SQLite; Postgres entra quando houver credenciais."""
+class PostgresCouponStore(CouponStore):
+    """Decisão de arquitetura de 2026-09-06: o Coupon Worker roda na
+    MESMA máquina do GG Oferta e persiste `coupons` diretamente no MESMO
+    PostgreSQL dele -- sem sync de SQLite, sem API intermediária, sem
+    segundo banco para integração. Só a tabela `coupons` (dado
+    compartilhado real) migra pra cá; `source_candidates`/`control`
+    (bookkeeping interno de descoberta, que o GG nunca consome)
+    continuam no SQLite local, delegados a uma instância interna de
+    `SqliteCouponStore` -- "nenhum outro módulo muda" continua valendo:
+    `scanner.py`/`worker.py` só enxergam a interface `CouponStore`.
+
+    `store_id` textual do worker (ex.: `"amazon"`) é resolvido pra FK
+    real de `stores.id` a cada upsert (cache em processo). Se o código
+    não existir no GG, isso é um ERRO DE INTEGRAÇÃO explícito
+    (`CouponStoreIntegrationError`) -- o worker NUNCA cria uma loja nova
+    sozinho.
+    """
+
+    def __init__(self, postgres_dsn: str, sqlite_db_path: str) -> None:
+        import psycopg  # import local: só quando Postgres é configurado
+
+        # Falha EXPLÍCITA e IMEDIATA aqui (na construção, nunca só no
+        # primeiro upsert) -- quando o ambiente está configurado para
+        # Postgres (`COUPONS_POSTGRES_DSN` presente), o worker NUNCA cai
+        # de volta pro SQLite silenciosamente por trás de uma conexão
+        # ruim. `SELECT 1` prova que a conexão é usável de verdade, não
+        # só que o TCP conectou.
+        try:
+            self._conn = psycopg.connect(postgres_dsn, autocommit=True)
+            with self._conn.cursor() as cur:
+                cur.execute("SELECT 1")
+        except Exception as error:
+            raise CouponStoreIntegrationError(
+                "COUPONS_POSTGRES_DSN está configurada, mas a conexão com "
+                f"o Postgres do GG Oferta falhou: {error!r}. O worker "
+                "NUNCA cai para SQLite silenciosamente quando o ambiente "
+                "está configurado para Postgres -- corrija a credencial/"
+                "conexão antes de rodar de novo (nenhum cupom seria "
+                "visível ao GG Oferta enquanto isso não for corrigido)."
+            ) from error
+        self._sqlite = SqliteCouponStore(sqlite_db_path)
+        self._store_uuid_by_code: dict[str, str] = {}
+
+    def _resolve_store_uuid(self, store_code: str) -> str:
+        cached = self._store_uuid_by_code.get(store_code)
+        if cached is not None:
+            return cached
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT id FROM stores WHERE code = %s", (store_code,))
+            row = cur.fetchone()
+        if row is None:
+            raise CouponStoreIntegrationError(
+                f"store code desconhecido pelo GG Oferta: {store_code!r} -- "
+                "o worker nunca cria uma loja nova; cadastre em `stores` "
+                "no GG Oferta antes de habilitar esta loja no worker."
+            )
+        resolved = str(row[0])
+        self._store_uuid_by_code[store_code] = resolved
+        return resolved
+
+    def upsert(self, coupon: Coupon) -> None:
+        store_uuid = self._resolve_store_uuid(coupon.store_id)
+        # Mesmo dedup do SqliteCouponStore: código nulo (clip automático)
+        # recai na chave de evidência, nunca `NULL` (`coupons.code` é
+        # `NOT NULL DEFAULT ''` no schema do GG).
+        dedup_code = coupon.code or ""
+        last_seen_at = datetime.fromisoformat(coupon.last_seen_at)
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO coupons (
+                    id, store_id, code, discount_kind, discount_value,
+                    minimum_purchase_amount, maximum_discount_amount,
+                    scope_kind, scope_reference, valid_until, raw_rule_text,
+                    source_url, evidence, last_seen_at, status
+                ) VALUES (
+                    gen_random_uuid(), %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s
+                )
+                ON CONFLICT (store_id, code, evidence) DO UPDATE SET
+                    last_seen_at            = EXCLUDED.last_seen_at,
+                    status                  = EXCLUDED.status,
+                    raw_rule_text           = EXCLUDED.raw_rule_text,
+                    source_url              = EXCLUDED.source_url,
+                    valid_until             = EXCLUDED.valid_until,
+                    discount_kind           = EXCLUDED.discount_kind,
+                    discount_value          = EXCLUDED.discount_value,
+                    minimum_purchase_amount = EXCLUDED.minimum_purchase_amount,
+                    maximum_discount_amount = EXCLUDED.maximum_discount_amount,
+                    scope_kind              = EXCLUDED.scope_kind,
+                    scope_reference         = EXCLUDED.scope_reference
+                """,
+                (
+                    store_uuid, dedup_code, coupon.discount_kind,
+                    coupon.discount_value, coupon.minimum_purchase_amount,
+                    coupon.maximum_discount_amount, coupon.scope_kind,
+                    coupon.scope_reference, coupon.valid_until,
+                    coupon.raw_rule_text, coupon.source_url, coupon.evidence,
+                    last_seen_at, coupon.status,
+                ),
+            )
+
+    def expire_stale(self, store_id: str, before_iso: str) -> int:
+        store_uuid = self._resolve_store_uuid(store_id)
+        before = datetime.fromisoformat(before_iso)
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE coupons SET status = 'expired'
+                WHERE store_id = %s AND status = 'active' AND last_seen_at < %s
+                """,
+                (store_uuid, before),
+            )
+            return cur.rowcount
+
+    # ---- bookkeeping interno (nunca lido pelo GG) -- delega ao SQLite local
+
+    def record_candidate(self, store_id: str, label_text: str, url: str) -> str:
+        return self._sqlite.record_candidate(store_id, label_text, url)
+
+    def mark_candidate_status(self, store_id: str, label_text: str, status: str,
+                              resolved_url: Optional[str] = None) -> None:
+        self._sqlite.mark_candidate_status(store_id, label_text, status, resolved_url)
+
+    def get_adopted_candidates(self, store_id: str):
+        return self._sqlite.get_adopted_candidates(store_id)
+
+    def get_control(self, key: str) -> Optional[str]:
+        return self._sqlite.get_control(key)
+
+    def set_control(self, key: str, value: str) -> None:
+        self._sqlite.set_control(key, value)
+
+    def get_promo_window(self) -> PromoWindow:
+        return self._sqlite.get_promo_window()
+
+    def set_promo_window(self, window: PromoWindow) -> None:
+        self._sqlite.set_promo_window(window)
+
+    def clear_promo_window(self) -> None:
+        self._sqlite.clear_promo_window()
+
+    def close(self) -> None:
+        self._conn.close()
+        self._sqlite.close()
+
+
+def open_coupon_store(
+    db_path: str, *, postgres_dsn: Optional[str] = None
+) -> CouponStore:
+    """Factory: `postgres_dsn` fornecida -> `PostgresCouponStore` (cupons
+    no Postgres do GG Oferta, bookkeeping interno no SQLite local
+    apontado por `db_path`); ausente -> `SqliteCouponStore` (tudo local --
+    modo intencional pra uso/teste local, nunca um "fallback" de um modo
+    Postgres mal configurado: se `postgres_dsn` FOR fornecida e a conexão
+    falhar, `PostgresCouponStore.__init__` levanta
+    `CouponStoreIntegrationError` em vez de cair pra cá).
+
+    Loga explicitamente qual backend foi escolhido -- nunca fica
+    implícito/silencioso qual dos dois está realmente em uso."""
+    if postgres_dsn:
+        logger.info(
+            "Coupon store: PostgresCouponStore -- cupons vão direto pro "
+            "Postgres do GG Oferta (mesma máquina); bookkeeping interno "
+            "continua no SQLite local (%s).",
+            db_path,
+        )
+        return PostgresCouponStore(postgres_dsn, db_path)
+    logger.warning(
+        "Coupon store: SqliteCouponStore -- TUDO local (%s), incluindo "
+        "`coupons`. O GG Oferta NÃO recebe nenhum cupom enquanto "
+        "COUPONS_POSTGRES_DSN não for configurada. Modo esperado só para "
+        "uso/teste local do worker isolado.",
+        db_path,
+    )
     return SqliteCouponStore(db_path)

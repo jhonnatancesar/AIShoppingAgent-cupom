@@ -26,7 +26,11 @@ from dotenv import load_dotenv
 
 from cadence import Window, mode_for, next_slot, now_sp, parse_promo_window
 from control_server import ControlServer
-from coupons.persistence import CouponStore, open_coupon_store
+from coupons.persistence import (
+    CouponStore,
+    CouponStoreIntegrationError,
+    open_coupon_store,
+)
 from coupons.scanner import Scanner, StoreBackoff
 from coupons.stores import load_stores
 from zoneinfo import ZoneInfo
@@ -114,7 +118,19 @@ async def amain(once: bool) -> None:
         sys.exit(1)
 
     db_path = str((BASE_DIR / config.get("data_db", "data/worker.db")).resolve())
-    store = open_coupon_store(db_path)
+    # Decisão de 2026-09-06: quando configurado, `coupons` persiste direto
+    # no mesmo PostgreSQL do GG Oferta (mesma máquina) -- nunca sync de
+    # SQLite, nunca API intermediária. `source_candidates`/`control`
+    # continuam no SQLite local independente disso (ver PostgresCouponStore).
+    postgres_dsn = os.getenv("COUPONS_POSTGRES_DSN") or None
+    try:
+        store = open_coupon_store(db_path, postgres_dsn=postgres_dsn)
+    except CouponStoreIntegrationError as error:
+        # Falha explícita e imediata -- nunca cai pra SQLite silenciosamente
+        # quando COUPONS_POSTGRES_DSN está configurada, nunca "aparenta
+        # saudável" gravando local enquanto o GG não recebe nada.
+        logger.error("Falha ao inicializar o coupon store: %s Abortando.", error)
+        sys.exit(1)
 
     if once:
         await run_scan(config, store)

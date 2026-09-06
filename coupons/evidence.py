@@ -16,6 +16,7 @@ import re
 from typing import Dict, List, Optional
 
 from .persistence import Coupon
+from .stores import CARD_KINDS
 
 # Marcadores literais de texto de cupom por loja (ASCII + re.I; pt-BR escreve
 # "cupom" sem acento).
@@ -186,12 +187,19 @@ def _context_window(text: str, raw: str, pad: int = 140) -> str:
 
 
 # Sinal de status/validade -- genérico, vale pra qualquer loja (não é
-# fraseado específico de uma loja só). Nunca decide status/valid_until
-# estruturado sozinho (isso seria inferir data relativa tipo "amanhã");
-# só anexa o texto LITERAL, quando presente, ao raw_rule_text.
+# fraseado específico de uma loja só). "Vence"/"válido até" nunca decidem
+# status estruturado sozinhos (seria inferir data relativa tipo
+# "amanhã") -- só anexam o texto LITERAL ao raw_rule_text, como sempre.
+#
+# "esgotad[oa]" (tempo passado/presente -- já esgotou) é diferente de
+# "está esgotando" (ainda em andamento, cupom pode continuar válido
+# hoje) -- só o primeiro é tratado como sinal DEFINITIVO de
+# indisponibilidade (ver `_is_exhausted`), reaproveitando o status
+# `"expired"` que já existe (nunca um estado novo).
+_EXHAUSTED_PATTERN = re.compile(r"esgotad[oa]\S*", re.I)
 _STATUS_HINT_PATTERNS = (
     re.compile(r"est[aá]\s+esgotando\S*", re.I),
-    re.compile(r"esgotad[oa]\S*", re.I),
+    _EXHAUSTED_PATTERN,
     re.compile(r"vence\s+[^\n.!]{0,40}", re.I),
     re.compile(r"v[aá]lido\s+at[eé]\s+[^\n.!]{0,40}", re.I),
 )
@@ -203,6 +211,18 @@ def _find_status_hint(text: str) -> Optional[str]:
         if m:
             return m.group(0).strip()
     return None
+
+
+def _is_exhausted(text: str, *, source_kind: str) -> bool:
+    """Só confia no sinal "esgotado" quando o texto já está ESCOPADO a um
+    card/produto específico (`CARD_KINDS` -- `cards`/`search`/`product`,
+    `coupons/stores.py`). Fontes de nível de loja (`home`/`coupons`/
+    `banners`, `STORE_LEVEL_KINDS`) varrem a PÁGINA INTEIRA -- "esgotado"
+    ali pode se referir a um produto qualquer sem relação com o cupom
+    encontrado na mesma página; nunca decide status a partir desse
+    escopo largo demais (permanece só como texto em `raw_rule_text`,
+    igual a antes desta correção)."""
+    return source_kind in CARD_KINDS and bool(_EXHAUSTED_PATTERN.search(text))
 
 
 def infer_scope(source_kind: str, context_text: str, reference_url: Optional[str]):
@@ -229,14 +249,15 @@ def build_coupons(store_id: str, source_kind: str, text: str,
     """Constrói Coupons com escopo correto a partir do texto de uma fonte."""
     coupons: List[Coupon] = []
     status_hint = _find_status_hint(text)  # mesmo card/texto, não por achado
+    exhausted = _is_exhausted(text, source_kind=source_kind)
     for f in find_coupon_markers(store_id, text):
         scope_kind, scope_ref = infer_scope(
             source_kind, _context_window(text, f.get("raw_rule_text")), reference_url)
         raw_rule_text = f.get("raw_rule_text") or ""
         if status_hint:
             # Texto LITERAL, nunca inferido (ex.: "Está esgotando!",
-            # "Vence amanhã", "Válido até 31/12") -- não decide status
-            # estruturado nem calcula data relativa, só anexa a evidência.
+            # "Vence amanhã", "Válido até 31/12") -- sempre anexado à
+            # evidência, além de eventualmente decidir `status` abaixo.
             raw_rule_text = f"{raw_rule_text} | {status_hint}"
         coupons.append(Coupon(
             store_id=store_id,
@@ -250,6 +271,11 @@ def build_coupons(store_id: str, source_kind: str, text: str,
             scope_reference=scope_ref,
             raw_rule_text=raw_rule_text,
             source_url=reference_url or "",
+            # Reaproveita "expired" (nenhum status novo): a fonte já
+            # informou literalmente que esgotou, só quando o escopo é
+            # confiável o bastante para acreditar que é ESTE cupom
+            # (ver `_is_exhausted`).
+            status="expired" if exhausted else "active",
         ))
     return coupons
 
