@@ -250,12 +250,28 @@ Todas as 4 lojas confirmadas achando cupom real, não só "varredura sem
 erro". Detalhe completo de cada achado/correção nos commits do
 histórico deste repositório.
 
-## Próximo passo (quando você informar o banco)
+## Persistência no PostgreSQL do GG Oferta (concluído, commit `caca098`)
 
-- `PostgresCouponStore` com a mesma interface `CouponStore`, apontando para o
-  Postgres do AIShoppingAgent (`stores.id` / `coupons`). Nenhum outro módulo
-  muda — só o factory de persistência. `source_candidates` (descoberta/
-  adoção) também precisa de uma tabela equivalente no Postgres quando
-  migrar.
-- Fase de **aplicabilidade** e **notificação** ficam do lado do backend (não
-  neste worker), preservando a separação da DEC-093.
+`PostgresCouponStore` (`coupons/persistence.py`) implementa a mesma
+interface `CouponStore`, apontando para o Postgres do AIShoppingAgent
+(`stores.id` / `coupons`) via `psycopg[binary]` assíncrono, quando
+`COUPONS_POSTGRES_DSN` está definido em `.env` — sem essa variável, o
+worker continua gravando só em SQLite local (`data/worker.db`), e o
+GG Oferta não vê os cupons coletados. Nenhum outro módulo deste worker
+muda; só o factory de persistência escolhe qual `CouponStore` usar.
+`evidence.py` também foi refinado nesse mesmo commit para distinguir
+"esgotado" (marca expirado) de "está esgotando" (ambíguo, não decidido
+automaticamente).
+
+Fase de **aplicabilidade** (consumo do cupom no preço) e **notificação**
+ficam do lado do GG Oferta (`app/coupons/pricing.py`), não neste worker
+— preservando a separação da DEC-093. Guia de instalação dos três
+componentes juntos (GG Oferta + César Core/OmniRoute + este worker):
+[`docs/installation/integrated-setup.md`](https://github.com/jhonnatancesar/AIShoppingAgent/blob/main/docs/installation/integrated-setup.md)
+no repositório `AIShoppingAgent`. Deploy em PROD dos três componentes
+(repositórios, ordem, migrations, gate Gemini):
+[`docs/operations/prod-deployment-handoff.md`](https://github.com/jhonnatancesar/AIShoppingAgent/blob/main/docs/operations/prod-deployment-handoff.md).
+Arquitetura canônica da integração GG ↔ César Core (onde este worker se
+encaixa como fonte de dado de cupom):
+[`docs/architecture/gg-oferta-core.md`](https://github.com/jhonnatancesar/cesar-core/blob/main/docs/architecture/gg-oferta-core.md)
+no repositório `cesar-core`.
