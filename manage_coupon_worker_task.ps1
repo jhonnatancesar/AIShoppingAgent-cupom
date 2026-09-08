@@ -112,7 +112,15 @@ switch ($Action) {
             throw "-TaskUser e obrigatorio em Install/Update (ex.: 'CESAR-SERVER\Administrator'), precisa ser o usuario da sessao com auto-logon."
         }
 
-        $action = New-ScheduledTaskAction `
+        # `$taskAction`, nunca `$action` -- PowerShell não diferencia
+        # maiúsculas/minúsculas em nome de variável, então `$action`
+        # reatribuiria o MESMO `$Action` do param() acima (que carrega
+        # `[ValidateSet("Install", ...)]`). Achado real de deploy: essa
+        # reatribuição faz o `[ValidateSet]` revalidar o novo valor (o
+        # objeto `MSFT_TaskExecAction` de `New-ScheduledTaskAction`), que
+        # não está no set permitido -- `Register-ScheduledTask` nunca era
+        # alcançado, mesmo com `-Action Install` correto na chamada.
+        $taskAction = New-ScheduledTaskAction `
             -Execute $PythonPath `
             -Argument "`"$WorkerScript`"" `
             -WorkingDirectory $ScriptDir
@@ -137,7 +145,7 @@ switch ($Action) {
         if ($PSCmdlet.ShouldProcess($TaskName, "Register-ScheduledTask ($Action)")) {
             Register-ScheduledTask `
                 -TaskName $TaskName `
-                -Action $action `
+                -Action $taskAction `
                 -Trigger $trigger `
                 -Principal $principal `
                 -Settings $settings `
