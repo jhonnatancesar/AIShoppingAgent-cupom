@@ -25,7 +25,7 @@ function Fail($msg) { Write-Host "`nERRO: $msg" -ForegroundColor Red; exit 1 }
 
 Log "1/4 verificando Microsoft Edge instalado"
 $edgeCandidates = @(
-    "$env:ProgramFiles(x86)\Microsoft\Edge\Application\msedge.exe",
+    "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
     "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
     "$env:LocalAppData\Microsoft\Edge\Application\msedge.exe"
 )
@@ -46,9 +46,20 @@ $venvPython = Join-Path $ScriptDir ".venv\Scripts\python.exe"
 Log "3/4 token de controle (.env)"
 if (-not (Test-Path ".env")) {
     $bytes = New-Object byte[] 36
-    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    # `RandomNumberGenerator::Fill` (static) só existe em .NET moderno --
+    # Windows PowerShell 5.1 (a base do Windows Server) roda .NET
+    # Framework, onde só `::Create().GetBytes(bytes)` (instância) existe.
+    # Achado real de deploy: `::Fill` levanta MethodNotFound nesse host,
+    # silenciosamente deixando $bytes zerado (o erro não interrompe o
+    # script por padrão) -- token fraco/previsível gerado sem aviso.
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
     $token = [Convert]::ToBase64String($bytes) -replace '[+/=]', ''
-    "# Gerado pelo install.ps1. Troque se quiser.`nAUTH_TOKEN=$token`n" | Set-Content -Encoding utf8 ".env"
+    # `-Encoding utf8` do Windows PowerShell 5.1 grava BOM (achado real:
+    # quebrou `cesar_core_api_key` do GG Oferta do mesmo jeito) -- `ascii`
+    # nunca grava BOM e o token é só base64 (sem acento), sem perda.
+    "# Gerado pelo install.ps1. Troque se quiser.`nAUTH_TOKEN=$token`n" | Set-Content -Encoding ascii ".env"
+    Remove-Variable token, bytes
     Log "Novo .env criado com token gerado."
 } else {
     Log "Arquivo .env ja existe; mantendo (nao sobrescrito)."
