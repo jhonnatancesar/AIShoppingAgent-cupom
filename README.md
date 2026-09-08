@@ -198,6 +198,19 @@ bem menor que o worker de coleta de preço.
 Autenticação **obrigatória**: `Authorization: Bearer <AUTH_TOKEN>` do `.env`.
 Sem token configurado, o servidor **não sobe** (fail-closed).
 
+**Chamador automático (GG Oferta, desde `v1.3.10`):** além do uso manual
+abaixo, o scheduler de coleta do GG Oferta (`claim_due_work`) chama este
+endpoint sozinho, best-effort, sempre que decide `HIGH_ACTIVITY` para uma
+loja/escopo (`app/coupons/worker_control.py` no repositório GG Oferta,
+`window_end` = agora + `AISHOPPING_COLLECTION_HIGH_ACTIVITY_DURATION_MINUTES`).
+Só dispara se `AISHOPPING_COUPON_WORKER_CONTROL_URL` e
+`AISHOPPING_COUPON_WORKER_CONTROL_TOKEN_FILE` estiverem configurados do
+lado do GG Oferta (`None`/desligado por padrão); nunca lança exceção, só
+loga aviso se o Coupon Worker estiver fora do ar ou rejeitar o token —
+uma falha aqui nunca derruba a coleta de preço. O uso manual via `curl`
+abaixo continua válido para forçar uma janela de promoção fora do que o
+GG detecta sozinho.
+
 Entrar em promoção (datas em ISO com timezone):
 
 ```bash
