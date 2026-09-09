@@ -30,6 +30,8 @@ from typing import Optional
 
 import aiohttp
 
+from .job_object import EdgeLifecycleJob, JobObjectError
+
 logger = logging.getLogger("coupons.edge_transport")
 
 
@@ -105,6 +107,7 @@ class EdgeCdpProcess:
         self._startup_timeout_seconds = startup_timeout_seconds
         self._probe_interval_seconds = probe_interval_seconds
         self._process: Optional[asyncio.subprocess.Process] = None
+        self._job: Optional[EdgeLifecycleJob] = None
         self._cdp_url = f"http://127.0.0.1:{port}"
 
     @property
@@ -138,6 +141,18 @@ class EdgeCdpProcess:
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-background-mode",
+            # Achado real (2026-09-09, deploy da v1.0.1 em PROD): sem esta
+            # flag, o msedge.exe que a gente lança pode se relançar
+            # sozinho (camada de compatibilidade do Windows) num PID
+            # NOVO e encerrar o processo original -- `self._process`
+            # ficava apontando pro processo ERRADO (já morto), então
+            # `stop()`/Job Object nunca alcançavam o Edge real, que ficava
+            # órfão preso na porta até alguém matar manualmente. Provado
+            # ao vivo: sem a flag, PID rastreado != PID dono da porta;
+            # com ela, os dois PIDs batem. Edge já adiciona esta mesma
+            # flag sozinho quando relança -- passar de propósito evita o
+            # relançamento acontecer.
+            "--edge-skip-compat-layer-relaunch",
         ]
         if self._headless:
             # Achado real (validado nesta mesma pasta, TASK-106): headless
@@ -165,6 +180,24 @@ class EdgeCdpProcess:
         except OSError as e:
             raise EdgeLaunchError(f"não consegui iniciar o Edge dedicado: {e}") from e
 
+        # Achado real (2026-09-09): sem isto, um `--once` cortado por
+        # timeout externo (ou qualquer kill abrupto deste processo Python)
+        # deixava o Edge órfão preso na porta -- toda rodada seguinte
+        # falhava com "porta já responde como CDP" até alguém matar o
+        # processo travado manualmente. Job Object garante, no nível do
+        # kernel, que a árvore inteira do Edge morre junto com este
+        # processo Python, por qualquer motivo -- mesmo mecanismo já
+        # corrigido no `collection_worker` principal (ver
+        # `coupons/job_object.py`). Best-effort: falha aqui nunca impede
+        # o Edge de subir, só perde a proteção extra.
+        try:
+            job = EdgeLifecycleJob()
+            job.assign(self._process.pid)
+        except JobObjectError:
+            logger.warning("edge_job_object_setup_failed", exc_info=True)
+        else:
+            self._job = job
+
         try:
             await self._wait_until_ready()
         except Exception:
@@ -176,18 +209,30 @@ class EdgeCdpProcess:
         """Encerra o processo diretamente -- este objeto sempre é quem
         iniciou o processo (nunca adota um Edge pré-existente), então não
         precisa de ``Browser.close`` via CDP antes: ``terminate()`` no
-        próprio handle do subprocesso já é suficiente e mais simples."""
+        próprio handle do subprocesso já é suficiente e mais simples.
+
+        O fechamento do Job Object roda em ``finally`` -- precisa
+        acontecer mesmo quando o processo já está morto (early return),
+        senão o handle do job vaza. Redundante com a garantia de kernel
+        (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`), mas fechar aqui também
+        depois de um `terminate()`/`kill()` bem-sucedido é higiene normal
+        de recurso, não a proteção principal."""
         process = self._process
         self._process = None
-        if process is None or process.returncode is not None:
-            return
-        process.terminate()
+        job = self._job
+        self._job = None
         try:
-            await asyncio.wait_for(process.wait(), timeout=5)
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
-        logger.info("edge_cdp_encerrado porta=%s", self._port)
+            if process is not None and process.returncode is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    process.kill()
+                    await process.wait()
+                logger.info("edge_cdp_encerrado porta=%s", self._port)
+        finally:
+            if job is not None:
+                job.close()
 
     async def _wait_until_ready(self) -> None:
         deadline = asyncio.get_running_loop().time() + self._startup_timeout_seconds
