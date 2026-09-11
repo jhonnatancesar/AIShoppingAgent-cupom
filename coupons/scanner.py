@@ -41,7 +41,7 @@ from urllib.parse import urljoin
 from playwright.async_api import async_playwright
 
 from .edge_transport import EdgeCdpProcess, EdgeLaunchError
-from .evidence import build_coupons, has_coupon_hint
+from .evidence import build_coupons, build_widget_coupon, has_coupon_hint
 from .persistence import CouponStore
 from .stores import (
     CARD_KINDS,
@@ -108,6 +108,21 @@ class Scanner:
         self.scroll_steps = int(self.scancfg.get("scroll_steps_before_cards", 4))
         self.scroll_pause_seconds = float(
             self.scancfg.get("scroll_pause_seconds", 1.5)
+        )
+        # Achado real (2026-09-10): a descoberta automática de fontes
+        # (`_discover_candidate_sources`) não tinha limite nenhum -- numa
+        # loja com página cheia de conteúdo real (ex.: Amazon `/deals`,
+        # dezenas de cards de oferta), cada link "parecido" com cupom
+        # (mesmo depois de afinar a regex, sempre pode sobrar algum
+        # padrão novo) virava uma verificação própria (aba nova +
+        # navegação + `_pace()`), sem teto e sem lembrar o que já foi
+        # visto nas OUTRAS fontes da MESMA rodada -- inflando a rodada de
+        # uma loja de segundos pra minutos. Nunca é sobre esperar menos
+        # (a cadência de 1h/30min continua intocada, `cadence.py`) -- é
+        # sobre a descoberta ficar do tamanho do que ela realmente
+        # precisa achar (poucas fontes novas, não dezenas de ruído).
+        self.max_new_candidates_per_store_round = int(
+            self.scancfg.get("max_new_candidates_per_store_round", 5)
         )
 
     async def _pace(self) -> None:
@@ -206,6 +221,14 @@ class Scanner:
             return result
 
         round_start = datetime.now(timezone.utc).isoformat()
+        # Estado da rodada DESTA loja -- nunca reverifica o mesmo
+        # candidato (mesma URL) achado em duas fontes diferentes da
+        # mesma rodada (ex.: mesmo link de rodapé aparece em home E em
+        # cada página de busca), e nunca passa do teto de verificações
+        # novas por rodada (`max_new_candidates_per_store_round`).
+        # Resetado a cada `_scan_store` -- escopo de UMA loja, UMA rodada.
+        self._round_seen_candidate_urls: set = set()
+        self._round_candidate_verifications = 0
         page = None
         try:
             # Aba nova por loja (estado de navegação limpo entre lojas),
@@ -350,17 +373,36 @@ class Scanner:
 
     _CANDIDATE_LINK_JS = r"""
     () => {
-      const rx = /cupom|liquida|promo[çc][ãa]o|\b\d{1,2}\.\d{1,2}\b/i;
       // Link de produto individual (card inteiro clicavel) nunca e
       // candidato -- so badges/botoes/abas curtos de entrada de secao.
       const productPattern = /\/dp\/|\/gp\/product\/|\/produto\/\d|\/p\/MLB|\/up\/MLB|MLB-?\d{6,}/i;
+      // Achado real (2026-09-10, revisao 2): "cupom"/"liquida"/"promoção"
+      // no texto/href e sempre um sinal EXPLICITO e confiavel -- nunca
+      // restringido pelo que vem a seguir. Já o padrão numérico
+      // `\d{1,2}\.\d{1,2}` (pensado pra campanha tipo "9.9"/"11.11", que
+      // não tem NENHUM outro marcador explícito) também bate em
+      // especificação técnica (USB 3.2 Gen 2, Bluetooth 5.3, Wi-Fi 6.0,
+      // HDMI 2.1, versão de driver, DDR5 6.4 etc.) e em avaliação por
+      // estrelas ("4.4 de 5 estrelas") -- nenhum dos dois é uma fonte de
+      // cupom, e cada falso positivo abre aba nova pra verificar um link
+      // de filtro/tracking (lento, sempre rejeitado). Por isso o padrão
+      // numérico SÓ conta quando NENHUM termo técnico/avaliação aparece
+      // no mesmo texto -- nunca quando "cupom"/"liquida"/"promoção" já
+      // apareceu explicitamente (esses sempre passam, mesmo citando um
+      // termo técnico, ex.: "Cupom Bluetooth 20% OFF").
+      const explicitKeyword = /cupom|liquida|promo[çc][ãa]o/i;
+      const campaignNumber = /\b\d{1,2}\.\d{1,2}\b/i;
+      const techOrRating = /\b(usb|bluetooth|wi-?fi|hdmi|displayport|thunderbolt|pcie|nvme|sata|ddr\d?|hz|ghz|mhz|gera[çc][ãa]o|vers[ãa]o|version|polegadas?|gen)\b|de\s+5\s+estrelas|\bestrelas?\b|\bstars?\b/i;
       const out = [];
       const seen = new Set();
       for (const a of document.querySelectorAll('a[href]')) {
         const text = (a.innerText || '').trim();
         if (text.length === 0 || text.length > 60) continue;
         const href = a.getAttribute('href') || '';
-        if (!rx.test(text) && !rx.test(href)) continue;
+        const hasExplicit = explicitKeyword.test(text) || explicitKeyword.test(href);
+        const hasCampaignNumber = campaignNumber.test(text) || campaignNumber.test(href);
+        if (!hasExplicit && !hasCampaignNumber) continue;
+        if (!hasExplicit && hasCampaignNumber && techOrRating.test(text)) continue;
         if (!href || href.startsWith('#') || href.startsWith('javascript:')) continue;
         if (productPattern.test(href)) continue;
         if (seen.has(href)) continue;
@@ -396,6 +438,24 @@ class Scanner:
             full_url = urljoin(base, href) if not href.startswith("http") else href
             if full_url in known_urls:
                 continue
+            # Nunca reverifica a MESMA URL duas vezes na mesma rodada
+            # desta loja (achado real: o mesmo link de rodapé/filtro
+            # aparece em várias fontes -- home, cada termo de busca --
+            # sem isso, cada aparição virava uma verificação nova).
+            if full_url in self._round_seen_candidate_urls:
+                continue
+            self._round_seen_candidate_urls.add(full_url)
+            # Teto de verificações novas por rodada desta loja -- a
+            # descoberta serve pra achar POUCAS fontes novas plausíveis,
+            # nunca pra esgotar tudo que uma página cheia de conteúdo
+            # real (ex.: Amazon /deals) parece combinar com a regex.
+            if self._round_candidate_verifications >= self.max_new_candidates_per_store_round:
+                logger.info(
+                    "Loja %s: teto de %d verificações novas de candidato atingido nesta rodada -- "
+                    "ignorando o restante (continuam elegíveis pra rodadas futuras).",
+                    spec.id, self.max_new_candidates_per_store_round,
+                )
+                break
             label_text = c.get("text") or ""
             status = self.store.record_candidate(spec.id, label_text, full_url)
             if status == "new":
@@ -404,6 +464,7 @@ class Scanner:
                     spec.id, label_text, full_url,
                 )
             if status != "adopted":
+                self._round_candidate_verifications += 1
                 persisted_total += await self._verify_and_maybe_adopt(
                     page.context, spec, full_url, label_text, known_urls
                 )
@@ -496,6 +557,8 @@ class Scanner:
                       product_hints: List[Tuple[str, str]], result: Dict) -> None:
         """Abre detalhe do produto SOMENTE para indícios de cupom, limitado."""
         store_id = spec.id
+        product_source = next((s for s in spec.sources if s.kind == "product"), None)
+        code_selector = product_source.code_selector if product_source else None
         opened = 0
         for href, card_text in product_hints:
             if opened >= self.max_details:
@@ -513,10 +576,24 @@ class Scanner:
                 if await self._mark_blocked(page, store_id, rec):
                     result["sources"].append(rec)
                     break
-                body = await self._body_text(page)
-                for coupon in build_coupons(store_id, "product", body, href):
-                    rec["evidence"].append(coupon.raw_rule_text or coupon.evidence)
-                    self._persist(coupon, rec)
+                widget_coupon = None
+                if code_selector:
+                    widget_coupon = await self._extract_widget_coupon(
+                        page, store_id, code_selector, href
+                    )
+                if widget_coupon is not None:
+                    # Achado estruturado via DOM (código real num <input
+                    # readonly>, nunca visível em innerText) -- substitui a
+                    # varredura de texto genérica nesta página, pra nunca
+                    # criar um segundo registro fragmentado (sem código) do
+                    # MESMO cupom real.
+                    rec["evidence"].append(widget_coupon.raw_rule_text or widget_coupon.evidence)
+                    self._persist(widget_coupon, rec)
+                else:
+                    body = await self._body_text(page)
+                    for coupon in build_coupons(store_id, "product", body, href):
+                        rec["evidence"].append(coupon.raw_rule_text or coupon.evidence)
+                        self._persist(coupon, rec)
                 result["sources"].append(rec)
                 opened += 1
             except Exception as e:
@@ -525,6 +602,38 @@ class Scanner:
                 result["sources"].append(rec)
                 logger.info("Loja %s: detalhe %s: %s", store_id, href, e)
         result["product_details_opened"] = opened
+
+    async def _extract_widget_coupon(
+        self, page: Any, store_id: str, code_selector: str, href: str,
+    ) -> Any:
+        """Consulta de DOM real (não regex de texto) -- lê o VALOR de um
+        `<input readonly>` de código de cupom (achado real, Magalu,
+        2026-09-10: `innerText`/`textContent` nunca inclui valor de
+        `<input>`, então nenhum regex de página consegue ver isso).
+        `None` quando o seletor não acha nada nesta página (fallback pro
+        caminho genérico continua acontecendo pelo chamador) -- nunca
+        levanta, nunca inventa um código quando o elemento não existe."""
+        try:
+            handle = await page.query_selector(code_selector)
+            if handle is None:
+                return None
+            code = await handle.input_value()
+            code = (code or "").strip() or None
+            if code is None:
+                return None
+            # Texto do container mais próximo (desconto + validade) --
+            # `closest('section')` é auto-ajustável ao invés de um número
+            # fixo de níveis de ancestral (mais robusto a mudanças de
+            # layout que não afetem o próprio widget).
+            widget_text = await page.evaluate(
+                "(el) => (el.closest('section') || el.parentElement)?.innerText || ''",
+                handle,
+            )
+        except Exception:
+            return None
+        return build_widget_coupon(
+            store_id, code=code, widget_text=widget_text or "", reference_url=href,
+        )
 
     # ---- bloqueio / utilidades ---------------------------------------------
 

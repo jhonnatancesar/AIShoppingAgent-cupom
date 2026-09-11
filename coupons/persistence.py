@@ -170,14 +170,53 @@ class SqliteCouponStore(CouponStore):
                 last_seen_at       = excluded.last_seen_at,
                 status             = excluded.status,
                 raw_rule_text      = excluded.raw_rule_text,
-                source_url         = excluded.source_url,
-                valid_until        = excluded.valid_until,
-                discount_kind      = excluded.discount_kind,
-                discount_value     = excluded.discount_value,
-                minimum_purchase_amount = excluded.minimum_purchase_amount,
-                maximum_discount_amount = excluded.maximum_discount_amount,
-                scope_kind         = excluded.scope_kind,
-                scope_reference    = excluded.scope_reference
+                -- Achado real da auditoria (2026-09-10, revisão pós-relatório):
+                -- a MESMA evidence key pode ser revisitada por uma coleta
+                -- depois menos completa -- sem proteção, o UPDATE apagava
+                -- silenciosamente um dado bom com NULL. "Enriquece, nunca
+                -- apaga": um valor NOVO não-nulo sempre substitui; um
+                -- valor NOVO nulo preserva o que já existia. `status`/
+                -- `raw_rule_text` continuam sempre atualizados (refletem o
+                -- que foi visto AGORA, não uma extração estruturada
+                -- sujeita a falhar).
+                --
+                -- Correção adicional (revisão 2026-09-10, segunda rodada):
+                -- COALESCE por COLUNA individual arriscava combinar um
+                -- campo NOVO com o PAR antigo de um campo relacionado
+                -- (ex.: discount_kind novo + discount_value antigo, dois
+                -- valores que nunca formaram um par real) -- mesmo que
+                -- isso nunca aconteça com os parsers de hoje (sempre
+                -- gravam os dois juntos ou nenhum), o UPSERT não deveria
+                -- depender dessa convenção pra ficar coerente. Agora
+                -- (discount_kind, discount_value, minimum_purchase_amount,
+                -- maximum_discount_amount) só atualizam TODOS JUNTOS,
+                -- só quando a nova linha realmente trouxe um par
+                -- discount_kind+discount_value completo (nunca metade
+                -- nova + metade antiga); e (scope_kind, scope_reference)
+                -- só atualizam JUNTOS quando a nova linha decidiu um
+                -- scope_kind (scope_reference pode legitimamente ser
+                -- nulo mesmo decidido, ex. store_wide -- por isso o gate
+                -- é só em scope_kind, não nos dois).
+                source_url         = COALESCE(excluded.source_url, coupons.source_url),
+                valid_until        = COALESCE(excluded.valid_until, coupons.valid_until),
+                discount_kind = CASE
+                    WHEN excluded.discount_kind IS NOT NULL AND excluded.discount_value IS NOT NULL
+                    THEN excluded.discount_kind ELSE coupons.discount_kind END,
+                discount_value = CASE
+                    WHEN excluded.discount_kind IS NOT NULL AND excluded.discount_value IS NOT NULL
+                    THEN excluded.discount_value ELSE coupons.discount_value END,
+                minimum_purchase_amount = CASE
+                    WHEN excluded.discount_kind IS NOT NULL AND excluded.discount_value IS NOT NULL
+                    THEN excluded.minimum_purchase_amount ELSE coupons.minimum_purchase_amount END,
+                maximum_discount_amount = CASE
+                    WHEN excluded.discount_kind IS NOT NULL AND excluded.discount_value IS NOT NULL
+                    THEN excluded.maximum_discount_amount ELSE coupons.maximum_discount_amount END,
+                scope_kind = CASE
+                    WHEN excluded.scope_kind IS NOT NULL
+                    THEN excluded.scope_kind ELSE coupons.scope_kind END,
+                scope_reference = CASE
+                    WHEN excluded.scope_kind IS NOT NULL
+                    THEN excluded.scope_reference ELSE coupons.scope_reference END
             """,
             (
                 coupon.store_id, dedup_code, coupon.discount_kind,
@@ -404,14 +443,41 @@ class PostgresCouponStore(CouponStore):
                     last_seen_at            = EXCLUDED.last_seen_at,
                     status                  = EXCLUDED.status,
                     raw_rule_text           = EXCLUDED.raw_rule_text,
-                    source_url              = EXCLUDED.source_url,
-                    valid_until             = EXCLUDED.valid_until,
-                    discount_kind           = EXCLUDED.discount_kind,
-                    discount_value          = EXCLUDED.discount_value,
-                    minimum_purchase_amount = EXCLUDED.minimum_purchase_amount,
-                    maximum_discount_amount = EXCLUDED.maximum_discount_amount,
-                    scope_kind              = EXCLUDED.scope_kind,
-                    scope_reference         = EXCLUDED.scope_reference
+                    -- Mesma correção do SqliteCouponStore.upsert (achado
+                    -- real 2026-09-10): "enriquece, nunca apaga" -- um
+                    -- valor novo nulo nunca sobrescreve um valor bom já
+                    -- persistido.
+                    source_url              = COALESCE(EXCLUDED.source_url, coupons.source_url),
+                    valid_until             = COALESCE(EXCLUDED.valid_until, coupons.valid_until),
+                    -- Correção adicional (revisão 2026-09-10, segunda
+                    -- rodada; mesma lógica do SqliteCouponStore.upsert):
+                    -- (discount_kind, discount_value, minimum_purchase_
+                    -- amount, maximum_discount_amount) só atualizam TODOS
+                    -- JUNTOS, só quando a nova linha trouxe um par
+                    -- discount_kind+discount_value completo -- nunca
+                    -- combina um campo novo com o par antigo de outro
+                    -- campo relacionado. (scope_kind, scope_reference) só
+                    -- atualizam JUNTOS quando scope_kind foi decidido
+                    -- (scope_reference pode ser nulo mesmo decidido, ex.
+                    -- store_wide).
+                    discount_kind = CASE
+                        WHEN EXCLUDED.discount_kind IS NOT NULL AND EXCLUDED.discount_value IS NOT NULL
+                        THEN EXCLUDED.discount_kind ELSE coupons.discount_kind END,
+                    discount_value = CASE
+                        WHEN EXCLUDED.discount_kind IS NOT NULL AND EXCLUDED.discount_value IS NOT NULL
+                        THEN EXCLUDED.discount_value ELSE coupons.discount_value END,
+                    minimum_purchase_amount = CASE
+                        WHEN EXCLUDED.discount_kind IS NOT NULL AND EXCLUDED.discount_value IS NOT NULL
+                        THEN EXCLUDED.minimum_purchase_amount ELSE coupons.minimum_purchase_amount END,
+                    maximum_discount_amount = CASE
+                        WHEN EXCLUDED.discount_kind IS NOT NULL AND EXCLUDED.discount_value IS NOT NULL
+                        THEN EXCLUDED.maximum_discount_amount ELSE coupons.maximum_discount_amount END,
+                    scope_kind = CASE
+                        WHEN EXCLUDED.scope_kind IS NOT NULL
+                        THEN EXCLUDED.scope_kind ELSE coupons.scope_kind END,
+                    scope_reference = CASE
+                        WHEN EXCLUDED.scope_kind IS NOT NULL
+                        THEN EXCLUDED.scope_reference ELSE coupons.scope_reference END
                 """,
                 (
                     store_uuid, dedup_code, coupon.discount_kind,

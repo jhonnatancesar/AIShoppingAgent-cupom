@@ -35,6 +35,15 @@ class SourceSpec:
     url: Optional[str] = None
     selector: Optional[str] = None
     terms: List[str] = field(default_factory=list)
+    # Achado real (2026-09-10, auditoria completa do sistema de cupons):
+    # algumas lojas mostram o código do cupom só dentro do VALOR de um
+    # <input readonly> (ex.: Magalu, data-testid="coupon-code-input") --
+    # nunca aparece em `innerText`/`textContent`, então nenhum regex de
+    # texto consegue achar. Quando configurado, o scanner faz uma consulta
+    # de DOM adicional (`element.value`) nessa fonte, além da varredura de
+    # texto normal -- opcional, só para as lojas onde já foi confirmado ao
+    # vivo que o código mora nesse tipo de elemento.
+    code_selector: Optional[str] = None
 
 
 @dataclass
@@ -70,6 +79,7 @@ def _parse_source(raw: Dict[str, Any]) -> SourceSpec:
         url=raw.get("url"),
         selector=raw.get("selector"),
         terms=list(raw.get("terms", [])),
+        code_selector=raw.get("code_selector"),
     )
 
 

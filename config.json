@@ -83,14 +83,16 @@
       ]
     },
     "magalu": {
-      "_comentario": "Fonte 'search' adicionada apos diagnostico real (2026-08-30): home e /ofertas nao tinham nenhuma campanha ativa no momento, mas paginas de busca real tem cupom (percentual E valor fixo) o tempo todo em varias categorias -- ate entao a Magalu nunca era nem visitada nessas paginas.",
+      "_comentario": "Fonte 'search' adicionada apos diagnostico real (2026-08-30): home e /ofertas nao tinham nenhuma campanha ativa no momento, mas paginas de busca real tem cupom (percentual E valor fixo) o tempo todo em varias categorias -- ate entao a Magalu nunca era nem visitada nessas paginas. Atualizacao 2026-09-10: '/ofertas/' e um 404 real e permanente (confirmado ao vivo), nao so ausencia de campanha -- ver comentario da fonte 'coupons' abaixo pela URL de substituicao.",
       "enabled": true,
       "sources": [
         { "kind": "home",    "label": "home",
           "url": "https://www.magazineluiza.com.br/",
           "selector": "a[data-testid=\"product-card-link\"][href*=\"/p/\"]" },
         { "kind": "coupons", "label": "area-cupons",
-          "url": "https://www.magazineluiza.com.br/ofertas/" },
+          "_comentario": "Corrigido 2026-09-10: '/ofertas/' confirmado ao vivo como 404 (nunca existiu uma central de cupons dedicada -- '/cupons/', '/cupom/' e '/central-de-cupons/' tambem 404 ao vivo, nao adotados). Substituido por '/selecao/relampagoendless' ('Ofertas Relampago'), URL REAL encontrada num link de navegacao da propria home (nao adivinhada), confirmada 200 ao vivo e com cards de produto no mesmo formato ja usado pelas outras fontes desta loja. Selector adicionado (nao existia antes) para escopar a extracao por card em vez do texto da pagina inteira, e para alimentar o aprofundamento de produto (mesmo mecanismo de 'cards'/'banners').",
+          "url": "https://www.magazineluiza.com.br/selecao/relampagoendless",
+          "selector": "a[data-testid=\"product-card-link\"][href*=\"/p/\"]" },
         { "kind": "banners", "label": "banners-promo",
           "selector": "a[data-testid=\"product-card-link\"][href*=\"/p/\"], section" },
         { "kind": "cards",   "label": "cards-ofertas",
@@ -98,7 +100,8 @@
         { "kind": "search",  "label": "busca-cupom",
           "selector": "a[data-testid=\"product-card-link\"][href*=\"/p/\"]",
           "terms": ["notebook gamer", "fone bluetooth", "cadeira gamer", "smartphone"] },
-        { "kind": "product", "label": "detalhe-produto" }
+        { "kind": "product", "label": "detalhe-produto",
+          "code_selector": "[data-testid=\"coupon-code-input\"]" }
       ]
     },
     "mercadolivre": {
